@@ -40,7 +40,7 @@ current), `✗` failed. The view stays put when it's done; the cursor is yours a
 | --- | --- |
 | **Homebrew** | Installed (or updated) as its own step, with PATH wired into `~/.zprofile` |
 | **Git** | git itself, then a global config (name/email, default branch, `pull.rebase false`) |
-| **Formulae** | node, python, postgresql, MongoDB Community (via the `mongodb/brew` tap), mas |
+| **Formulae** | node, python, postgresql, sqlite, MongoDB Community (via the `mongodb/brew` tap), gh, hcloud, awscli, mas |
 | **Casks** | Google Chrome, VS Code, WebStorm, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Google Gemini, Claude, Claude Code, Codex, Logitech Options+, BetterDisplay, TeamViewer, NVIDIA GeForce NOW |
 | **Shell** | Oh My Zsh, zsh-autosuggestions, zsh-syntax-highlighting, Powerlevel10k |
 | **macOS Settings** | Theme Mode (dark), App Icons, Dock, Shortcuts (`Cmd+"`), Firewall, Battery, Hostname |

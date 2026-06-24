@@ -29,10 +29,17 @@ TAPS=(
 # `postgresql` / `python` are aliases that always point at the latest version;
 # mongodb-community is the latest MongoDB Community (from the mongodb/brew tap).
 FORMULAE=(
+  # runtimes
   node
   python
+  # databases
   postgresql
+  sqlite
   mongodb-community
+  # cli tools
+  gh
+  hcloud
+  awscli
   mas
 )
 
@@ -91,8 +98,7 @@ ZSH_PLUGINS_VALUE="git zsh-autosuggestions zsh-syntax-highlighting"
 # Internals — you usually don't need to touch anything below here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-DONE=0; SKIPPED=0; FAILED=0
-RECAP_INSTALLED=""; RECAP_UPDATED=""; RECAP_SKIPPED=""; RECAP_FAILED=""
+INSTALLED=0; UPDATED=0; SKIPPED=0; FAILED=0   # tallied per task, shown in the end card
 ERR_LOG="$(mktemp -t mysetup-errors 2>/dev/null || echo /tmp/mysetup-errors.$$)"
 SU_CACHE="$(mktemp -t mysetup-swupdate 2>/dev/null || echo /tmp/mysetup-swupdate.$$)"
 SUDO_KEEPALIVE_PID=""; SUDO_PRIMED=0
@@ -121,14 +127,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 fmt_secs() { local s=$1; if [ "$s" -lt 60 ]; then printf '%ds' "$s"; else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi; }
-rec_installed() { RECAP_INSTALLED="${RECAP_INSTALLED}"$'\n'"$1"; }
-rec_updated()   { RECAP_UPDATED="${RECAP_UPDATED}"$'\n'"$1"; }
-rec_skipped()   { RECAP_SKIPPED="${RECAP_SKIPPED}"$'\n'"$1"; }
-note_fail()     { FAILED=$((FAILED + 1)); RECAP_FAILED="${RECAP_FAILED}"$'\n'"$1"; }
-_count() { local n=0 l; while IFS= read -r l; do [ -n "$l" ] && n=$((n + 1)); done <<EOF
-$1
-EOF
-printf '%d' "$n"; }
 
 # ── Commands the tasks run ───────────────────────────────────────────────────
 
@@ -300,6 +298,14 @@ build_tasks() {
   add_task 7 "macOS" macos ""
 }
 
+# Install $2 if missing, upgrade it if outdated, otherwise leave it. $1 is the
+# Homebrew type flag (--formula or --cask). exit 0 installed · 11 upgraded · 10 current.
+_brew_pkg() {
+  brew list "$1" --versions "$2" >/dev/null 2>&1 || { brew install "$1" "$2" || exit 1; exit 0; }
+  [ -n "$(brew outdated "$1" "$2" 2>/dev/null)" ] && { brew upgrade "$1" "$2" || exit 1; exit 11; }
+  exit 10
+}
+
 # Run one task (in a subshell). Exit code: 0 done · 10 skipped · 11 updated · else failed.
 run_task() {
   local kind="${T_KIND[$1]}" arg="${T_ARG[$1]}"
@@ -308,10 +314,8 @@ run_task() {
     fn)      "$arg"; exit $? ;;
     tap)     if brew tap 2>/dev/null | grep -qxF "$arg"; then brew trust --tap "$arg" >/dev/null 2>&1; exit 10; fi
              brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
-    formula) if ! brew list --formula --versions "$arg" >/dev/null 2>&1; then brew install "$arg" || exit 1; exit 0; fi
-             [ -n "$(brew outdated --formula "$arg" 2>/dev/null)" ] && { brew upgrade --formula "$arg" || exit 1; exit 11; }; exit 10 ;;
-    cask)    if ! brew list --cask --versions "$arg" >/dev/null 2>&1; then brew install --cask "$arg" || exit 1; exit 0; fi
-             [ -n "$(brew outdated --cask "$arg" 2>/dev/null)" ] && { brew upgrade --cask "$arg" || exit 1; exit 11; }; exit 10 ;;
+    formula) _brew_pkg --formula "$arg" ;;
+    cask)    _brew_pkg --cask "$arg" ;;
     omz)     [ -d "$HOME/.oh-my-zsh" ] && exit 10; _install_omz; exit $? ;;
     plugin)  local d="${arg#*|}"; d="${d%%|*}"; local u="${arg##*|}"
              [ -d "$HOME/.oh-my-zsh/custom/$d" ] && exit 10
@@ -332,15 +336,13 @@ run_task() {
   exit 0
 }
 
-_is_pkg() { case "$1" in formula|cask|omz|plugin|mas) return 0 ;; *) return 1 ;; esac; }
-
 finish_task() {
   local i="$1" rc="$2" logf="$3" kind="${T_KIND[$1]}" label="${T_LABEL[$1]}"
   case "$rc" in
-    0)  T_STAT[$i]="ok";   DONE=$((DONE + 1)); _is_pkg "$kind" && rec_installed "$label" ;;
-    11) T_STAT[$i]="upd";  DONE=$((DONE + 1)); rec_updated "$label" ;;
-    10) T_STAT[$i]="skip"; SKIPPED=$((SKIPPED + 1)); rec_skipped "$label" ;;
-    *)  T_STAT[$i]="fail"; note_fail "$label"; { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG" ;;
+    0)  T_STAT[$i]="ok";   INSTALLED=$((INSTALLED + 1)) ;;
+    11) T_STAT[$i]="upd";  UPDATED=$((UPDATED + 1)) ;;
+    10) T_STAT[$i]="skip"; SKIPPED=$((SKIPPED + 1)) ;;
+    *)  T_STAT[$i]="fail"; FAILED=$((FAILED + 1)); { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG" ;;
   esac
   case "$kind" in clt|macos) [ "$rc" = 0 ] && T_TIME[$i]="started" ;; esac   # background download kicked off
 }
@@ -444,10 +446,9 @@ stream() {
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 summary() {
-  local upd; upd="$(_count "$RECAP_UPDATED")"
   printf '\n  %s%s❖  my-setup%s  %s· done in %s%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$(fmt_secs "$SECONDS")" "$RESET"
   printf '  %s%s✓ %d installed%s   %s↑ %d updated%s   %s⊘ %d skipped%s   %s✗ %d failed%s\n' \
-    "$GREEN" "$BOLD" $((DONE - upd)) "$RESET" "$CYAN" "$upd" "$RESET" \
+    "$GREEN" "$BOLD" "$INSTALLED" "$RESET" "$CYAN" "$UPDATED" "$RESET" \
     "$MUTED" "$SKIPPED" "$RESET" "$RED" "$FAILED" "$RESET"
   if [ "$FAILED" -gt 0 ]; then
     printf '\n  %sFailures — re-run to retry (finished steps are skipped):%s\n' "$YELLOW" "$RESET"
