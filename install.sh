@@ -12,8 +12,8 @@
 # change what gets installed.
 
 # No `set -e` (a failed step must never abort the run) and no `set -u` (an
-# unexpected unset/empty variable must never crash it either). Each step handles
-# its own success/failure and the script always moves on to the next one.
+# unexpected unset/empty variable must never crash it either). Each task handles
+# its own success/failure and the run always moves on to the next one.
 set -o pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25,30 +25,40 @@ TAPS=(
   mongodb/brew
 )
 
-# Command-line tools (Homebrew formulae). `git` is handled in its own section.
-# mongodb-community is the latest MongoDB Community server (from mongodb/brew).
+# Homebrew formulae (CLI tools + servers). `git` is added automatically.
+# `postgresql` / `python` are aliases that always point at the latest version;
+# mongodb-community is the latest MongoDB Community (from the mongodb/brew tap).
 FORMULAE=(
   node
   python
-  mas
+  postgresql
   mongodb-community
+  mas
 )
 
 # Applications (Homebrew casks).
 CASKS=(
+  # browser
   google-chrome
-  docker-desktop
+  # dev tools
   visual-studio-code
+  webstorm
+  docker-desktop
   postman
+  # database GUIs
   mongodb-compass
+  pgadmin4
+  # design
   figma
-  logi-options+
-  betterdisplay
+  # AI
   chatgpt
   google-gemini
   claude
   claude-code
   codex-app
+  # utilities
+  logi-options+
+  betterdisplay
   teamviewer
   nvidia-geforce-now
 )
@@ -81,399 +91,144 @@ ZSH_PLUGINS_VALUE="git zsh-autosuggestions zsh-syntax-highlighting"
 # Internals — you usually don't need to touch anything below here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-DONE=0
-SKIPPED=0
-FAILED=0
-SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+DONE=0; SKIPPED=0; FAILED=0
+RECAP_INSTALLED=""; RECAP_UPDATED=""; RECAP_SKIPPED=""; RECAP_FAILED=""
 ERR_LOG="$(mktemp -t mysetup-errors 2>/dev/null || echo /tmp/mysetup-errors.$$)"
-SUDO_KEEPALIVE_PID=""
-SUDO_PRIMED=0
-SUDOERS_FILE="/etc/sudoers.d/my-setup"
-SUDOERS_INSTALLED=0
-OUTDATED_FORMULAE=""
-OUTDATED_CASKS=""
+SU_CACHE="$(mktemp -t mysetup-swupdate 2>/dev/null || echo /tmp/mysetup-swupdate.$$)"
+SUDO_KEEPALIVE_PID=""; SUDO_PRIMED=0
+SUDOERS_FILE="/etc/sudoers.d/my-setup"; SUDOERS_INSTALLED=0
+STEP_TIMEOUT=1800   # seconds: kill any single task that hangs longer, then continue
+TUI_ACTIVE=0
+SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+CIRCLED=(① ② ③ ④ ⑤ ⑥ ⑦ ⑧ ⑨ ⑩)
 
-STEP=0           # current section number
-TOTAL_STEPS=9    # keep in sync with the section() calls in main()
-RUN_OK=0         # set by _run: 1 if the last command succeeded
-STEP_TIMEOUT=1200  # seconds: kill any single _run step that hangs longer, then continue
-# Recap buckets — newline-separated names (so entries like "Apple Developer" work)
-RECAP_INSTALLED=""
-RECAP_UPDATED=""
-RECAP_SKIPPED=""
-RECAP_FAILED=""
-
-# Colors (auto-disabled when output isn't a terminal).
+# 256-color palette (disabled when not a terminal): violet accent + semantics.
 if [ -t 1 ]; then
-  BOLD=$'\033[1m'; DIM=$'\033[2m'
-  RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'
-  RESET=$'\033[0m'
+  BOLD=$'\033[1m'; RESET=$'\033[0m'
+  ACCENT=$'\033[38;5;141m'; GREEN=$'\033[38;5;114m'; CYAN=$'\033[38;5;116m'
+  YELLOW=$'\033[38;5;179m'; RED=$'\033[38;5;203m'; MUTED=$'\033[38;5;245m'; RULE=$'\033[38;5;240m'
 else
-  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; CYAN=""; RESET=""
+  BOLD=""; RESET=""; ACCENT=""; GREEN=""; CYAN=""; YELLOW=""; RED=""; MUTED=""; RULE=""
 fi
 
-# Carriage-return + clear-to-end-of-line: only meaningful on a live terminal,
-# where they overwrite the spinner. Blank elsewhere so logs stay clean.
-if [ -t 1 ]; then CR=$'\r'; CLR=$'\033[K'; else CR=""; CLR=""; fi
-
 cleanup() {
+  [ "$TUI_ACTIVE" = "1" ] && printf '\033[?25h'   # always free the cursor again
   [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
-  # Revoke the temporary passwordless-sudo rule (see prime_sudo). This must always
-  # run, even on Ctrl-C, so we never leave the machine with an open sudo hole.
   [ "$SUDOERS_INSTALLED" = "1" ] && sudo rm -f "$SUDOERS_FILE" 2>/dev/null
-  # Drop any cached sudo credential too.
   [ "$SUDO_PRIMED" = "1" ] && sudo -k 2>/dev/null
-  [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
-  rm -f "$ERR_LOG" 2>/dev/null
+  rm -f "$ERR_LOG" "$SU_CACHE" 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
-banner() {
-  printf '\n%s%s' "$CYAN" "$BOLD"
-  printf '   ╭──────────────────────────────────────────────╮\n'
-  printf '   │   my-setup · fresh macOS bootstrap             │\n'
-  printf '   ╰──────────────────────────────────────────────╯'
-  printf '%s\n' "$RESET"
-  printf '%s   github.com/gokhangunduz/my-setup%s\n' "$DIM" "$RESET"
-}
-
-# Up-front overview of every step so you know what's coming, not just the step
-# you're on. Keep the entries in sync with the section() calls in main().
-show_plan() {
-  local rule="  ${DIM}────────────────────────────────────────────────${RESET}"
-  printf '\n  %sPlan%s  %s· %d steps%s\n%s\n' "$BOLD" "$RESET" "$DIM" "$TOTAL_STEPS" "$RESET" "$rule"
-  local entries=(
-    "🔑|Administrator access|one password, then unattended"
-    "🍺|Homebrew|the package manager"
-    "🔧|Git|install + global config"
-    "💻|Command-line tools|${#FORMULAE[@]} tools"
-    "📦|Applications|${#CASKS[@]} apps"
-    "🐚|Shell|Oh My Zsh + Powerlevel10k"
-    "🎨|macOS settings|dark, Dock, firewall, battery, hostname"
-    "🛒|Mac App Store|${#MAS_APPS[@]} apps"
-    "🔄|macOS updates|download in background"
-  )
-  local i=0 e icon rest title detail
-  for e in "${entries[@]}"; do
-    i=$((i + 1))
-    icon="${e%%|*}"; rest="${e#*|}"; title="${rest%%|*}"; detail="${rest##*|}"
-    printf '  %s%s%d%s %s  %s%-21s%s %s%s%s\n' \
-      "$DIM" "$CYAN" "$i" "$RESET" "$icon" "$BOLD" "$title" "$RESET" "$DIM" "$detail" "$RESET"
-  done
-  printf '%s\n' "$rule"
-}
-
-# Format a whole number of seconds as "12s" or "1m 47s".
-fmt_secs() {
-  if [ "$1" -lt 60 ]; then printf '%ds' "$1"; else printf '%dm %02ds' $(("$1" / 60)) $(("$1" % 60)); fi
-}
-
-# Recap bookkeeping (newline-separated; safe for names with spaces).
+fmt_secs() { local s=$1; if [ "$s" -lt 60 ]; then printf '%ds' "$s"; else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi; }
 rec_installed() { RECAP_INSTALLED="${RECAP_INSTALLED}"$'\n'"$1"; }
 rec_updated()   { RECAP_UPDATED="${RECAP_UPDATED}"$'\n'"$1"; }
 rec_skipped()   { RECAP_SKIPPED="${RECAP_SKIPPED}"$'\n'"$1"; }
 note_fail()     { FAILED=$((FAILED + 1)); RECAP_FAILED="${RECAP_FAILED}"$'\n'"$1"; }
+_count() { local n=0 l; while IFS= read -r l; do [ -n "$l" ] && n=$((n + 1)); done <<EOF
+$1
+EOF
+printf '%d' "$n"; }
 
-# section <title> <icon> [count] — numbered header with a category icon, plus a
-# dim running tally of the work so far (the "live total").
-section() {
-  if [ "$STEP" -gt 0 ] && [ "$((DONE + SKIPPED + FAILED))" -gt 0 ]; then
-    printf '   %s✓ %d   ⊘ %d   ✗ %d%s\n' "$DIM" "$DONE" "$SKIPPED" "$FAILED" "$RESET"
-  fi
-  STEP=$((STEP + 1))
-  local suffix=""
-  [ -n "${3:-}" ] && suffix="  ${DIM}· ${3}${RESET}"
-  printf '\n%s[%d/%d]%s %s  %s%s%s%s%s\n' \
-    "$DIM" "$STEP" "$TOTAL_STEPS" "$RESET" "$2" "$CYAN" "$BOLD" "$1" "$RESET" "$suffix"
-}
+# ── Commands the tasks run ───────────────────────────────────────────────────
 
-info() { printf '%s  %s%s\n' "$DIM" "$1" "$RESET"; }
+# Every settings/config task returns 10 ("skip") when it's already in the desired
+# state, so re-runs don't redo work — and the live view shows ⊘ instead of ✓.
 
-skip() {
-  printf '  %s⊘%s  %s %s(already installed)%s\n' "$DIM" "$RESET" "$1" "$DIM" "$RESET"
-  SKIPPED=$((SKIPPED + 1)); rec_skipped "$1"
-}
-
-uptodate() {
-  printf '  %s⊘%s  %s %s(up to date)%s\n' "$DIM" "$RESET" "$1" "$DIM" "$RESET"
-  SKIPPED=$((SKIPPED + 1)); rec_skipped "$1"
-}
-
-# apply_default <label> <defaults-write-args...> — apply a `defaults write`
-# preference and report ✓ / ✗. Used for the macOS settings section.
-apply_default() {
-  local label="$1"; shift
-  if defaults write "$@" 2>/dev/null; then
-    printf '  %s✓%s  %s\n' "$GREEN" "$RESET" "$label"
-    DONE=$((DONE + 1))
-  else
-    printf '  %s✗%s  %s\n' "$RED" "$RESET" "$label"
-    note_fail "$label"
-  fi
-}
-
-# apply_step <label> <command...> — run a settings command (often via sudo) and
-# report ✓ / ✗. Like apply_default but for non-`defaults` tweaks.
-apply_step() {
-  local label="$1"; shift
-  if "$@" >/dev/null 2>&1; then
-    printf '  %s✓%s  %s\n' "$GREEN" "$RESET" "$label"
-    DONE=$((DONE + 1))
-  else
-    printf '  %s✗%s  %s\n' "$RED" "$RESET" "$label"
-    note_fail "$label"
-  fi
-}
-
-# _run <label> <command...> — run a command with a live spinner, capture output,
-# time it, and report ✓ (with elapsed time) / ✗. Sets RUN_OK to 1/0. Never aborts;
-# failures are collected for the end recap.
-_run() {
-  local label="$1"; shift
-  local logf; logf="$(mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM")"
-  local t0=$SECONDS
-
-  "$@" >"$logf" 2>&1 &
-  local pid=$!
-
-  # Poll until the step finishes (animating a spinner on a terminal). If it hangs
-  # past STEP_TIMEOUT, terminate it so the run continues. The timeout lives inside
-  # this loop — no background timer — so nothing is ever left running afterwards.
-  [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null
-  local i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$((SECONDS - t0))" -ge "$STEP_TIMEOUT" ]; then
-      printf '\n[my-setup] step exceeded %ss — terminated so the run can continue\n' "$STEP_TIMEOUT" >>"$logf"
-      kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null
-      break
-    fi
-    if [ -t 1 ]; then
-      printf '\r  %s%s%s  %s\033[K' "$CYAN" "${SPINNER[i % ${#SPINNER[@]}]}" "$RESET" "$label"
-      i=$((i + 1)); sleep 0.08
-    else
-      sleep 1
-    fi
-  done
-  [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
-
-  { wait "$pid"; } 2>/dev/null; local rc=$?   # 2>/dev/null hides the "Terminated" note
-
-  local dt=$((SECONDS - t0)) took=""
-  [ "$dt" -ge 1 ] && took="$(fmt_secs "$dt")"
-
-  if [ "$rc" -eq 0 ]; then
-    printf '%s  %s✓%s  %-34s %s%s%s%s\n' "$CR" "$GREEN" "$RESET" "$label" "$DIM" "$took" "$RESET" "$CLR"
-    DONE=$((DONE + 1)); RUN_OK=1
-  else
-    printf '%s  %s✗%s  %-34s %s(failed)%s%s\n' "$CR" "$RED" "$RESET" "$label" "$DIM" "$RESET" "$CLR"
-    note_fail "$label"; RUN_OK=0
-    { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG"
-  fi
-
-  rm -f "$logf"
-  return 0
-}
-
-# ── Live checklist (for the brew formula/cask lists) ─────────────────────────
-# Renders the whole list up front as pending (○), then resolves each line in
-# place — ⊘ up-to-date, spinner while installing/updating, then ✓/↑/✗ — so the
-# full list and what's next are always visible. Falls back to plain sequential
-# output when stdout isn't a terminal.
-
-# Rewrite the line that is $1 rows above the cursor, then return to the bottom.
-_line_set() { printf '\033[%dA\r\033[K%s\033[%dB\r' "$1" "$2" "$1"; }
-
-# Decide what to do with one package: echoes install | update | uptodate.
-_classify() {
-  local kind="$1" name="$2" outdated
-  brew list --"$kind" --versions "$name" >/dev/null 2>&1 || { echo install; return; }
-  [ "$kind" = formula ] && outdated="$OUTDATED_FORMULAE" || outdated="$OUTDATED_CASKS"
-  printf '%s\n' "$outdated" | grep -qxF "$name" && echo update || echo uptodate
-}
-
-# Run a command while animating a spinner on the line $1 rows above the cursor,
-# with the same timeout/logging as _run. Finalizes that line with ✓ / ✗.
-_cl_exec() {
-  local up="$1" label="$2"; shift 2
-  local logf; logf="$(mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM")"
-  local t0=$SECONDS
-  "$@" >"$logf" 2>&1 &
-  local pid=$! i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$((SECONDS - t0))" -ge "$STEP_TIMEOUT" ]; then
-      printf '\n[my-setup] step exceeded %ss — terminated so the run can continue\n' "$STEP_TIMEOUT" >>"$logf"
-      kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; break
-    fi
-    _line_set "$up" "  ${CYAN}${SPINNER[i % ${#SPINNER[@]}]}${RESET}  ${label}"
-    i=$((i + 1)); sleep 0.08
-  done
-  { wait "$pid"; } 2>/dev/null; local rc=$?
-  local dt=$((SECONDS - t0)) took=""
-  [ "$dt" -ge 1 ] && took="$(fmt_secs "$dt")"
-  if [ "$rc" -eq 0 ]; then
-    _line_set "$up" "  ${GREEN}✓${RESET}  ${label}$([ -n "$took" ] && printf '   %s%s%s' "$DIM" "$took" "$RESET")"
-    DONE=$((DONE + 1)); RUN_OK=1
-  else
-    _line_set "$up" "  ${RED}✗${RESET}  ${label} ${DIM}(failed)${RESET}"
-    note_fail "$label"; RUN_OK=0
-    { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG"
-  fi
-  rm -f "$logf"
-}
-
-# process_list <formula|cask> <name...> — install/update each, as a live checklist.
-process_list() {
-  local kind="$1"; shift
-  local names=("$@")
-  local n=$# nm act
-  [ "$n" -eq 0 ] && return
-
-  if [ ! -t 1 ]; then            # no terminal: plain sequential output
-    for nm in "${names[@]}"; do
-      act="$(_classify "$kind" "$nm")"
-      case "$act" in
-        uptodate) uptodate "$nm" ;;
-        install)  if [ "$kind" = cask ]; then _run "$nm" brew install --cask "$nm"; else _run "$nm" brew install "$nm"; fi
-                  [ "$RUN_OK" = 1 ] && rec_installed "$nm" ;;
-        update)   _run "$nm (update)" brew upgrade --"$kind" "$nm"; [ "$RUN_OK" = 1 ] && rec_updated "$nm" ;;
-      esac
-    done
-    return
-  fi
-
-  # terminal: render the whole list as pending, then resolve each line in place
-  command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null
-  for nm in "${names[@]}"; do printf '  %s○%s  %s\n' "$DIM" "$RESET" "$nm"; done
-  local k=0 up
-  for nm in "${names[@]}"; do
-    k=$((k + 1)); up=$((n - k + 1))
-    act="$(_classify "$kind" "$nm")"
-    case "$act" in
-      uptodate)
-        _line_set "$up" "  ${DIM}⊘${RESET}  ${nm} ${DIM}(up to date)${RESET}"
-        SKIPPED=$((SKIPPED + 1)); rec_skipped "$nm" ;;
-      install)
-        if [ "$kind" = cask ]; then _cl_exec "$up" "$nm" brew install --cask "$nm"
-        else _cl_exec "$up" "$nm" brew install "$nm"; fi
-        [ "$RUN_OK" = 1 ] && rec_installed "$nm" ;;
-      update)
-        _cl_exec "$up" "$nm (update)" brew upgrade --"$kind" "$nm"
-        [ "$RUN_OK" = 1 ] && rec_updated "$nm" ;;
-    esac
-  done
-  command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
-}
-
-# ── Preflight ────────────────────────────────────────────────────────────────
-
-preflight() {
-  if [ "$(uname -s)" != "Darwin" ]; then
-    printf '%sThis installer is for macOS only.%s\n' "$RED" "$RESET"
-    exit 1
-  fi
-  if [ "$(uname -m)" = "arm64" ]; then
-    BREW_PREFIX="/opt/homebrew"
-  else
-    BREW_PREFIX="/usr/local"
-  fi
-}
-
-# ── Homebrew ─────────────────────────────────────────────────────────────────
-
-ensure_homebrew() {
-  section "Homebrew" "🍺"
-  if command -v brew >/dev/null 2>&1; then
-    BREW_PREFIX="$(brew --prefix)"
-    skip "Homebrew"
-  else
-    info "Installing Homebrew..."
-    # NONINTERACTIVE=1 is Homebrew's own required flag to skip its "Press RETURN"
-    # prompt — it's hardcoded here, not something you set. Nothing else uses env.
-    NONINTERACTIVE=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
-    # Trust the actual result, not the installer's exit code (a failed curl would
-    # otherwise look like success): continue only if the brew binary is really there.
-    if [ -x "$BREW_PREFIX/bin/brew" ] || command -v brew >/dev/null 2>&1; then
-      printf '  %s✓%s  Homebrew\n' "$GREEN" "$RESET"
-      DONE=$((DONE + 1)); rec_installed "Homebrew"
-    else
-      printf '  %s✗%s  Homebrew — cannot continue without it (check your connection and re-run).\n' "$RED" "$RESET"
-      exit 1
-    fi
-  fi
-
-  # Make brew available in this script and in future login shells.
-  eval "$("$BREW_PREFIX/bin/brew" shellenv)"
-  local line='eval "$('"$BREW_PREFIX"'/bin/brew shellenv)"'
-  if ! grep -qsF "$line" "$HOME/.zprofile" 2>/dev/null; then
-    printf '\n%s\n' "$line" >>"$HOME/.zprofile"
-  fi
-
-  _run "Updating Homebrew" brew update
-
-  # Snapshot what's outdated so already-installed items get upgraded, not skipped.
-  OUTDATED_FORMULAE="$(brew outdated --formula --quiet 2>/dev/null)"
-  OUTDATED_CASKS="$(brew outdated --cask --quiet 2>/dev/null)"
-}
-
-# ── Git ──────────────────────────────────────────────────────────────────────
-
-_configure_git() {
-  brew list --formula --versions git >/dev/null 2>&1 || brew install git || return 1
-  git config --global user.name "$GIT_NAME"
-  git config --global user.email "$GIT_EMAIL"
-  git config --global init.defaultBranch main
-  git config --global color.ui true
+_git_config() {
+  [ "$(git config --global user.name 2>/dev/null)" = "$GIT_NAME" ] \
+    && [ "$(git config --global user.email 2>/dev/null)" = "$GIT_EMAIL" ] \
+    && [ "$(git config --global pull.rebase 2>/dev/null)" = "false" ] && return 10
+  git config --global user.name "$GIT_NAME" &&
+  git config --global user.email "$GIT_EMAIL" &&
+  git config --global init.defaultBranch main &&
+  git config --global color.ui true &&
   git config --global pull.rebase false
 }
 
-setup_git() {
-  section "Git" "🔧"
-  _run "git (install + global config)" _configure_git
+_install_omz() {
+  local s; s="$(mktemp -t omz 2>/dev/null || echo "/tmp/omz.$$")"
+  curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$s" || return 1
+  sh "$s" --unattended; local rc=$?; rm -f "$s"; return $rc   # --unattended ⇒ no exec zsh / no chsh
 }
 
-# ── Formulae & casks ─────────────────────────────────────────────────────────
-
-setup_formulae() {
-  section "Command-line tools" "💻" "${#FORMULAE[@]}"
-  local t
-  # Add any third-party taps first (e.g. mongodb/brew for mongodb-community) and
-  # trust them — newer Homebrew refuses to load formulae from an untrusted tap.
-  for t in "${TAPS[@]}"; do
-    if brew tap 2>/dev/null | grep -qxF "$t"; then
-      skip "tap $t"
-    else
-      _run "tap $t" brew tap "$t"
-    fi
-    brew trust --tap "$t" >/dev/null 2>&1 || true
-  done
-  process_list formula "${FORMULAE[@]}"
+_configure_zshrc() {
+  local rc="$HOME/.zshrc"; [ -f "$rc" ] || touch "$rc"
+  grep -qF "ZSH_THEME=\"$ZSH_THEME_VALUE\"" "$rc" \
+    && grep -qF "plugins=($ZSH_PLUGINS_VALUE)" "$rc" && return 10
+  grep -q '^ZSH_THEME=' "$rc" \
+    && sed -i '' "s|^ZSH_THEME=.*|ZSH_THEME=\"$ZSH_THEME_VALUE\"|" "$rc" \
+    || printf '\nZSH_THEME="%s"\n' "$ZSH_THEME_VALUE" >>"$rc"
+  grep -q '^plugins=' "$rc" \
+    && sed -i '' "s|^plugins=.*|plugins=($ZSH_PLUGINS_VALUE)|" "$rc" \
+    || printf '\nplugins=(%s)\n' "$ZSH_PLUGINS_VALUE" >>"$rc"
 }
 
-# Ask for the password ONCE, then install a temporary passwordless-sudo rule for
-# this user (/etc/sudoers.d/my-setup) so nothing — Homebrew, casks like
-# logi-options+ whose installer needs root, softwareupdate — ever stops to prompt
-# again. The rule is revoked automatically when the script exits (see cleanup),
-# including on Ctrl-C. A timestamp keep-alive is the fallback if we can't write it.
+_appearance_prefs() {
+  [ "$(defaults read -g AppleInterfaceStyle 2>/dev/null)" = "Dark" ] && return 10
+  defaults write -g AppleInterfaceStyle -string Dark
+}
+_appicons_prefs() {
+  [ "$(defaults read -g AppleIconAppearanceTheme 2>/dev/null)" = "RegularDark" ] && return 10
+  defaults write -g AppleIconAppearanceTheme -string RegularDark
+}
+_dock_prefs() {
+  [ "$(defaults read com.apple.dock tilesize 2>/dev/null)" = "64" ] \
+    && [ "$(defaults read com.apple.dock magnification 2>/dev/null)" = "1" ] \
+    && [ "$(defaults read com.apple.dock largesize 2>/dev/null)" = "92" ] && return 10
+  defaults write com.apple.dock tilesize -int 64 &&
+  defaults write com.apple.dock magnification -bool true &&
+  defaults write com.apple.dock largesize -int 92
+  killall Dock 2>/dev/null; return 0
+}
+# Cmd+" → "Move focus to next window" (symbolic hotkey 27). parameters =
+# (34 = ", 10 = its key code on this keyboard layout, 1048576 = Cmd) — captured
+# verbatim from System Settings; re-capture if your keyboard layout differs.
+_keyboard_shortcut() {
+  local p="$HOME/Library/Preferences/com.apple.symbolichotkeys.plist"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:0' "$p" 2>/dev/null)" = "34" ] \
+    && [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:1' "$p" 2>/dev/null)" = "10" ] \
+    && [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:2' "$p" 2>/dev/null)" = "1048576" ] && return 10
+  defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 \
+    '{enabled=1;value={parameters=(34,10,1048576);type=standard;};}' || return 1
+  /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u 2>/dev/null || true
+}
+_firewall_on() {
+  /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -q 'State = 1' && return 10
+  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
+}
+_battery_prefs() {
+  local cust; cust="$(pmset -g custom 2>/dev/null)"
+  printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p' | grep -qE 'lessbright[[:space:]]+1' \
+    && printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p' | grep -qE 'womp[[:space:]]+0' \
+    && printf '%s' "$cust" | sed -n '/AC Power/,$p' | grep -qE '[^a-z]sleep[[:space:]]+0' \
+    && printf '%s' "$cust" | sed -n '/AC Power/,$p' | grep -qE 'womp[[:space:]]+1' && return 10
+  sudo pmset -b lessbright 1 &&   # dim the display on battery
+  sudo pmset -c sleep 0 &&        # never auto-sleep on power adapter
+  sudo pmset -c womp 1 &&         # wake for network access on power adapter
+  sudo pmset -b womp 0            # ...but not on battery
+}
+_hostname_set() {
+  [ "$(scutil --get LocalHostName 2>/dev/null)" = "gg" ] && return 10
+  sudo scutil --set LocalHostName gg
+}
+
+# ── Preflight, sudo, Homebrew (prepare phase, before the live view) ──────────
+
+preflight() {
+  if [ "$(uname -s)" != "Darwin" ]; then printf '%sThis installer is for macOS only.%s\n' "$RED" "$RESET"; exit 1; fi
+  if [ "$(uname -m)" = "arm64" ]; then BREW_PREFIX="/opt/homebrew"; else BREW_PREFIX="/usr/local"; fi
+}
+
+# Ask for the password once, then drop a temporary passwordless-sudo rule so
+# nothing prompts again mid-run (revoked on exit, see cleanup).
 prime_sudo() {
-  section "Administrator access" "🔑"
-  printf '  You will be asked for your macOS password %s%sonce%s%s now — after that the\n' \
-    "$BOLD" "$YELLOW" "$RESET" "$DIM"
-  printf '  whole run is unattended (no more prompts).%s\n' "$RESET"
-  if ! sudo -v; then
-    printf '\n  %sCould not obtain administrator access — aborting.%s\n' "$RED" "$RESET"
-    printf '  %sMake sure your account is an Administrator and try again.%s\n' "$DIM" "$RESET"
-    exit 1
-  fi
+  printf '  %s🔑  Enter your macOS password once — then it runs unattended.%s\n' "$MUTED" "$RESET"
+  if ! sudo -v; then printf '  %s✗ Administrator access is required (your account must be an admin).%s\n' "$RED" "$RESET"; exit 1; fi
   SUDO_PRIMED=1
-
-  # Try the passwordless rule (validated before it counts, so a bad write can't
-  # lock you out of sudo). If anything fails, fall back to a timestamp keep-alive.
   if printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$(id -un)" | sudo tee "$SUDOERS_FILE" >/dev/null 2>&1 \
-     && sudo chmod 440 "$SUDOERS_FILE" 2>/dev/null \
-     && sudo visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then
+     && sudo chmod 440 "$SUDOERS_FILE" 2>/dev/null && sudo visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then
     SUDOERS_INSTALLED=1
-    info "Granted for this run — revoked automatically when it finishes."
   else
     sudo rm -f "$SUDOERS_FILE" 2>/dev/null
     ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
@@ -481,240 +236,234 @@ prime_sudo() {
   fi
 }
 
-setup_casks() {
-  section "Applications" "📦" "${#CASKS[@]}"
-  process_list cask "${CASKS[@]}"
+# The single Homebrew task (runs in a subshell): install if missing, otherwise
+# update — and return 10 (skip) if it was already up to date.
+_brew_ensure() {
+  if command -v brew >/dev/null 2>&1; then
+    local out; out="$(brew update 2>&1)"
+    printf '%s' "$out" | grep -qi 'already up-to-date' && return 10
+    return 0
+  fi
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
+  [ -x "$BREW_PREFIX/bin/brew" ] || command -v brew >/dev/null 2>&1
+}
+# Put brew on PATH for the rest of the run + future shells. Runs in the PARENT
+# (right after the install task) so the change actually sticks. Idempotent.
+_brew_shellenv() {
+  BREW_PREFIX="$(brew --prefix 2>/dev/null || echo "$BREW_PREFIX")"
+  eval "$("$BREW_PREFIX/bin/brew" shellenv 2>/dev/null)"
+  grep -qsF '/brew shellenv' "$HOME/.zprofile" 2>/dev/null \
+    || printf '\neval "$(%s/bin/brew shellenv)"\n' "$BREW_PREFIX" >>"$HOME/.zprofile"
 }
 
-# ── macOS settings ───────────────────────────────────────────────────────────
+# ── Task model ───────────────────────────────────────────────────────────────
+# Eight steps; each owns an ordered list of tasks. Tasks are flat parallel arrays
+# so the renderer can group + count them per step.
 
-# Apply macOS preferences via `defaults write`. All permission-free (no sudo, no
-# TCC prompts). Appearance changes take effect at the next login or for newly
-# launched apps. Add more `apply_default` lines here as you like.
-setup_macos_settings() {
-  section "macOS settings" "🎨"
+# Clean categories. Homebrew is a real step (install + update), not a hidden wait.
+# Each task is atomic — nothing is merged (git install and git config are separate).
+STEP_ICON=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄)
+STEP_NAME=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates")
+NSTEPS=${#STEP_NAME[@]}
 
-  # Appearance: dark interface + dark app icons (macOS 26 Tahoe).
-  apply_default "Dark interface"  -g AppleInterfaceStyle      -string Dark
-  apply_default "Dark app icons"  -g AppleIconAppearanceTheme -string RegularDark
+T_STEP=(); T_LABEL=(); T_KIND=(); T_ARG=(); T_STAT=(); T_TIME=()
+add_task() { T_STEP+=("$1"); T_LABEL+=("$2"); T_KIND+=("$3"); T_ARG+=("$4"); T_STAT+=("pending"); T_TIME+=(""); }
 
-  # Dock: size + magnification (values eyeballed from the reference screenshot;
-  # tilesize/largesize both run 16–128, tweak to taste).
-  apply_default "Dock size"          com.apple.dock tilesize      -int 64
-  apply_default "Dock magnification" com.apple.dock magnification -bool true
-  apply_default "Dock zoom size"     com.apple.dock largesize     -int 92
-  killall Dock 2>/dev/null || true
-
-  # Keyboard: Cmd+" cycles the windows of the active app (Alt-Tab-style, but for
-  # one app's windows). This is "Move focus to next window" — symbolic hotkey 27.
-  # parameters = (34 = the " character, 10 = its key code on this keyboard layout,
-  # 1048576 = Cmd). Captured verbatim from System Settings after setting ⌘" by
-  # hand, so it reproduces exactly; re-capture if your keyboard layout differs.
-  if defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 \
-       '{enabled=1;value={parameters=(34,10,1048576);type=standard;};}' 2>/dev/null; then
-    printf '  %s✓%s  Cmd+" switches windows in the active app\n' "$GREEN" "$RESET"
-    DONE=$((DONE + 1))
-    /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u 2>/dev/null || true
-  else
-    printf '  %s✗%s  Cmd+" window-switch shortcut\n' "$RED" "$RESET"
-    note_fail "Cmd+\" shortcut"
-  fi
-
-  # Firewall: turn on, but leave it alone if it's already enabled.
-  if /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -q 'State = 1'; then
-    printf '  %s⊘%s  Firewall %s(already on)%s\n' "$DIM" "$RESET" "$DIM" "$RESET"
-    SKIPPED=$((SKIPPED + 1))
-  else
-    apply_step "Firewall on" sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
-  fi
-
-  # Battery / energy (matches the reference screenshot): dim on battery, never
-  # auto-sleep on AC, and wake for network access only on power adapter.
-  apply_step "Battery preferences" _battery_prefs
-
-  # Local hostname → gg.local (scutil appends .local for Bonjour).
-  apply_step "Local hostname (gg.local)" sudo scutil --set LocalHostName gg
-
-  info "Dark mode + keyboard shortcut apply at your next login; the Dock is live now."
+build_tasks() {
+  local x id nm
+  # 0 · Homebrew — the package manager itself (install if missing, else update)
+  add_task 0 "package manager" homebrew ""
+  # 1 · Git — install, then configure (separate tasks)
+  add_task 1 "git" formula "git"
+  add_task 1 "git config" fn _git_config
+  # 2 · Formulae — taps first, then CLI tools / servers
+  for x in "${TAPS[@]}"; do add_task 2 "tap ${x}" tap "$x"; done
+  for x in "${FORMULAE[@]}"; do add_task 2 "$x" formula "$x"; done
+  # 3 · Casks — apps
+  for x in "${CASKS[@]}"; do add_task 3 "$x" cask "$x"; done
+  # 4 · Shell — Oh My Zsh, then plugins/theme, then .zshrc
+  add_task 4 "oh-my-zsh" omz ""
+  for x in "${ZSH_PLUGINS[@]}"; do add_task 4 "${x%%|*}" plugin "$x"; done
+  add_task 4 ".zshrc" fn _configure_zshrc
+  # 5 · macOS Settings — appearance, then input, then system
+  add_task 5 "Theme Mode" fn _appearance_prefs
+  add_task 5 "App Icons" fn _appicons_prefs
+  add_task 5 "Dock" fn _dock_prefs
+  add_task 5 "Shortcuts" fn _keyboard_shortcut
+  add_task 5 "Firewall" fn _firewall_on
+  add_task 5 "Battery" fn _battery_prefs
+  add_task 5 "Hostname" fn _hostname_set
+  # 6 · Mac App Store
+  for x in "${MAS_APPS[@]}"; do id="${x%%|*}"; nm="${x##*|}"; add_task 6 "$nm" mas "$id"; done
+  # 7 · macOS Updates  (Command Line Tools + the macOS system, checked separately)
+  add_task 7 "Command Line Tools" clt ""
+  add_task 7 "macOS" macos ""
 }
 
-_battery_prefs() {
-  sudo pmset -b lessbright 1 &&   # slightly dim the display on battery
-  sudo pmset -c sleep 0 &&        # prevent auto-sleep on power adapter
-  sudo pmset -c womp 1 &&         # wake for network access on power adapter
-  sudo pmset -b womp 0            # ...but not on battery
+# Run one task (in a subshell). Exit code: 0 done · 10 skipped · 11 updated · else failed.
+run_task() {
+  local kind="${T_KIND[$1]}" arg="${T_ARG[$1]}"
+  case "$kind" in
+    homebrew) _brew_ensure; exit $? ;;
+    fn)      "$arg"; exit $? ;;
+    tap)     if brew tap 2>/dev/null | grep -qxF "$arg"; then brew trust --tap "$arg" >/dev/null 2>&1; exit 10; fi
+             brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
+    formula) if ! brew list --formula --versions "$arg" >/dev/null 2>&1; then brew install "$arg" || exit 1; exit 0; fi
+             [ -n "$(brew outdated --formula "$arg" 2>/dev/null)" ] && { brew upgrade --formula "$arg" || exit 1; exit 11; }; exit 10 ;;
+    cask)    if ! brew list --cask --versions "$arg" >/dev/null 2>&1; then brew install --cask "$arg" || exit 1; exit 0; fi
+             [ -n "$(brew outdated --cask "$arg" 2>/dev/null)" ] && { brew upgrade --cask "$arg" || exit 1; exit 11; }; exit 10 ;;
+    omz)     [ -d "$HOME/.oh-my-zsh" ] && exit 10; _install_omz; exit $? ;;
+    plugin)  local d="${arg#*|}"; d="${d%%|*}"; local u="${arg##*|}"
+             [ -d "$HOME/.oh-my-zsh/custom/$d" ] && exit 10
+             git clone --depth=1 "$u" "$HOME/.oh-my-zsh/custom/$d"; exit $? ;;
+    mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10; mas install "$arg"; exit $? ;;
+    clt)     softwareupdate -l >"$SU_CACHE" 2>&1   # one query to Apple, cached for the macOS task
+             local lbl; lbl="$(grep 'Label:' "$SU_CACHE" 2>/dev/null | grep -i 'Command Line Tools' | sed -E 's/.*Label: *//; s/ *$//' | head -1)"
+             [ -z "$lbl" ] && exit 10
+             nohup sudo softwareupdate --download "$lbl" >/dev/null 2>&1 & exit 0 ;;
+    macos)   local labels=() lbl
+             while IFS= read -r lbl; do
+               lbl="$(printf '%s' "$lbl" | sed -E 's/.*Label: *//; s/ *$//')"
+               [ -n "$lbl" ] && labels+=("$lbl")
+             done < <(grep 'Label:' "$SU_CACHE" 2>/dev/null | grep -vi 'Command Line Tools')
+             [ "${#labels[@]}" -eq 0 ] && exit 10
+             nohup sudo softwareupdate --download "${labels[@]}" >/dev/null 2>&1 & exit 0 ;;
+  esac
+  exit 0
 }
 
-# ── Mac App Store ────────────────────────────────────────────────────────────
+_is_pkg() { case "$1" in formula|cask|omz|plugin|mas) return 0 ;; *) return 1 ;; esac; }
 
-# Install Mac App Store apps with `mas`. They come from the App Store, not
-# Homebrew. `mas` can't sign in for you on modern macOS, so you must already be
-# signed into the App Store app; if not, the installs below fail fast with a
-# clear message and the rest of the setup carries on.
-setup_appstore() {
-  [ "${#MAS_APPS[@]}" -eq 0 ] && return
-  section "Mac App Store" "🛒" "${#MAS_APPS[@]}"
+finish_task() {
+  local i="$1" rc="$2" logf="$3" kind="${T_KIND[$1]}" label="${T_LABEL[$1]}"
+  case "$rc" in
+    0)  T_STAT[$i]="ok";   DONE=$((DONE + 1)); _is_pkg "$kind" && rec_installed "$label" ;;
+    11) T_STAT[$i]="upd";  DONE=$((DONE + 1)); rec_updated "$label" ;;
+    10) T_STAT[$i]="skip"; SKIPPED=$((SKIPPED + 1)); rec_skipped "$label" ;;
+    *)  T_STAT[$i]="fail"; note_fail "$label"; { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG" ;;
+  esac
+  case "$kind" in clt|macos) [ "$rc" = 0 ] && T_TIME[$i]="started" ;; esac   # background download kicked off
+}
 
-  # mas (the App Store CLI) is installed as a formula in the Command-line tools
-  # step above; bail out gracefully if it somehow isn't available.
-  command -v mas >/dev/null 2>&1 || { info "mas unavailable — skipping App Store apps."; return; }
+# ── Live full-screen view ────────────────────────────────────────────────────
 
-  # Don't hard-gate on the sign-in check (it's unreliable across macOS versions);
-  # just warn, then let each install succeed or fail on its own.
-  if ! mas account >/dev/null 2>&1; then
-    info "Couldn't confirm App Store sign-in. If the installs below fail, open the"
-    info "App Store app, sign in, then re-run."
-  fi
+ACTIVE_STEP=0; TFRAME=0; TASK_W=30
+EOL=$'\033[K'   # clear to end of line, so a shrinking line leaves no stale tail
 
-  local installed entry id name
-  installed="$(mas list 2>/dev/null)"
-  for entry in "${MAS_APPS[@]}"; do
-    id="${entry%%|*}"
-    name="${entry##*|}"
-    if printf '%s\n' "$installed" | grep -q "^$id "; then
-      skip "$name"
-      continue
-    fi
-    # Foreground so big downloads (Xcode is several GB) show their own progress.
-    info "Installing $name from the App Store (this can be large)..."
-    if mas install "$id"; then
-      printf '  %s✓%s  %s\n' "$GREEN" "$RESET" "$name"
-      DONE=$((DONE + 1)); rec_installed "$name"
-    else
-      printf '  %s✗%s  %s %s(sign in to the App Store, then re-run)%s\n' "$RED" "$RESET" "$name" "$DIM" "$RESET"
-      note_fail "$name"
-    fi
+_step_counts() {   # echoes "total done" for step $1
+  local s="$1" total=0 done=0 i
+  for i in "${!T_STEP[@]}"; do
+    [ "${T_STEP[$i]}" = "$s" ] || continue
+    total=$((total + 1))
+    case "${T_STAT[$i]}" in ok|skip|upd|fail) done=$((done + 1)) ;; esac
   done
+  printf '%d %d' "$total" "$done"
 }
 
-# ── Zsh: Oh My Zsh + plugins + Powerlevel10k ─────────────────────────────────
-
-_install_omz() {
-  local script; script="$(mktemp -t omz-install 2>/dev/null || echo "/tmp/omz.$$")"
-  curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$script" || return 1
-  # --unattended already sets RUNZSH=no and CHSH=no, so the installer won't launch
-  # zsh or change the login shell mid-run — the exact bug that cut the old script
-  # short. (No env vars needed.)
-  sh "$script" --unattended
-  local rc=$?
-  rm -f "$script"
-  return $rc
+render_task() {
+  local i="$1" st="${T_STAT[$1]}" label="${T_LABEL[$1]}" tm="${T_TIME[$1]}" g gc sec sc="$MUTED"
+  case "$st" in
+    pending) g="○"; gc="$RULE";   sec="" ;;
+    run)     g="${SPINNER[TFRAME % ${#SPINNER[@]}]}"; gc="$ACCENT"; sec="" ;;
+    ok)      g="✓"; gc="$GREEN";  sec="$tm" ;;
+    upd)     g="↑"; gc="$CYAN";   sec="${tm:-updated}" ;;
+    skip)    g="⊘"; gc="$MUTED";  sec="skipped" ;;
+    fail)    g="✗"; gc="$RED";    sec="failed"; sc="$RED" ;;
+  esac
+  printf '      %s%s%s  %-*s %s%s%s%s\n' "$gc" "$g" "$RESET" "$TASK_W" "$label" "$sc" "$sec" "$RESET" "$EOL"
 }
 
-_configure_zshrc() {
-  local rc="$HOME/.zshrc"
-  [ -f "$rc" ] || touch "$rc"
-
-  if grep -q '^ZSH_THEME=' "$rc"; then
-    sed -i '' "s|^ZSH_THEME=.*|ZSH_THEME=\"$ZSH_THEME_VALUE\"|" "$rc"
-  else
-    printf '\nZSH_THEME="%s"\n' "$ZSH_THEME_VALUE" >>"$rc"
-  fi
-
-  if grep -q '^plugins=' "$rc"; then
-    sed -i '' "s|^plugins=.*|plugins=($ZSH_PLUGINS_VALUE)|" "$rc"
-  else
-    printf '\nplugins=(%s)\n' "$ZSH_PLUGINS_VALUE" >>"$rc"
-  fi
+# Every step is always expanded: a header (✓ done / ▸ in progress / ○ upcoming)
+# plus all of its item rows, so the whole run is visible the entire time.
+render_step() {
+  local s="$1" badge="${CIRCLED[$s]}" icon="${STEP_ICON[$s]}" name="${STEP_NAME[$s]}"
+  local cnt total done i hg hc; cnt="$(_step_counts "$s")"; total="${cnt% *}"; done="${cnt#* }"
+  if [ "$total" -gt 0 ] && [ "$done" -ge "$total" ]; then hg="✓"; hc="$GREEN"
+  elif [ "$s" -le "$ACTIVE_STEP" ]; then hg="▸"; hc="$ACCENT"
+  else hg="○"; hc="$RULE"; fi
+  printf '  %s%s%s %s %s  %s%s%s   %s%d/%d%s%s\n' \
+    "$hc" "$hg" "$RESET" "$badge" "$icon" "$ACCENT$BOLD" "$name" "$RESET" "$MUTED" "$done" "$total" "$RESET" "$EOL"
+  for i in "${!T_STEP[@]}"; do [ "${T_STEP[$i]}" = "$s" ] && render_task "$i"; done
 }
 
-setup_zsh() {
-  section "Shell (Oh My Zsh + Powerlevel10k)" "🐚"
+render() {
+  local td=0 tt="${#T_LABEL[@]}" pct=0 i s
+  for i in "${!T_STAT[@]}"; do case "${T_STAT[$i]}" in ok|skip|upd|fail) td=$((td + 1)) ;; esac; done
+  [ "$tt" -gt 0 ] && pct=$(( td * 100 / tt ))
+  printf '\033[H'   # home (alt screen)
+  printf '  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s%s\n%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET" "$EOL" "$EOL"
+  for s in $(seq 0 $((NSTEPS - 1))); do render_step "$s"; done
+  printf '%s\n  %s%d%%%s  %s%d/%d tasks%s%s\n' \
+    "$EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$td" "$tt" "$RESET" "$EOL"
+  printf '\033[J'   # wipe anything left over from a taller previous frame
+}
 
-  if [ -d "$HOME/.oh-my-zsh" ]; then
-    skip "Oh My Zsh"
-  else
-    _run "Oh My Zsh" _install_omz; [ "$RUN_OK" = 1 ] && rec_installed "Oh My Zsh"
-  fi
-
-  local custom="$HOME/.oh-my-zsh/custom"
-  local entry label dest url
-  for entry in "${ZSH_PLUGINS[@]}"; do
-    label="${entry%%|*}"
-    dest="${entry#*|}"; dest="${dest%%|*}"
-    url="${entry##*|}"
-    if [ -d "$custom/$dest" ]; then
-      skip "$label"
-    else
-      _run "$label" git clone --depth=1 "$url" "$custom/$dest"; [ "$RUN_OK" = 1 ] && rec_installed "$label"
-    fi
+engine() {
+  printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1   # clear the screen, home, hide cursor
+  local i pid rc t0 dt logf
+  for i in "${!T_LABEL[@]}"; do
+    ACTIVE_STEP="${T_STEP[$i]}"; T_STAT[$i]="run"
+    logf="$(mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM")"; t0=$SECONDS
+    ( run_task "$i" ) >"$logf" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      if [ "$((SECONDS - t0))" -ge "$STEP_TIMEOUT" ]; then
+        printf '\n[my-setup] task exceeded %ss — terminated so the run can continue\n' "$STEP_TIMEOUT" >>"$logf"
+        kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; break
+      fi
+      render; TFRAME=$((TFRAME + 1)); sleep 0.1
+    done
+    { wait "$pid"; } 2>/dev/null; rc=$?
+    [ "${T_KIND[$i]}" = "homebrew" ] && [ "$rc" -ne 1 ] && _brew_shellenv   # put brew on PATH (parent)
+    dt=$((SECONDS - t0)); [ "$dt" -ge 1 ] && T_TIME[$i]="$(fmt_secs "$dt")"
+    finish_task "$i" "$rc" "$logf"; rm -f "$logf"; render
   done
-
-  _run ".zshrc (theme + plugins)" _configure_zshrc
+  ACTIVE_STEP=99; render
+  printf '\033[?25h'; TUI_ACTIVE=0   # done: the final view stays put, cursor is freed
 }
 
-# ── macOS software updates ───────────────────────────────────────────────────
-
-# Kick off the macOS system-update download and move on — we do NOT wait for it.
-# `softwareupdate --download --all` checks for and downloads any updates; we run
-# it detached (nohup, in the background) so the download keeps going after the
-# script ends without ever blocking the run. Installing/restarting is left to you.
-setup_macos_update() {
-  section "macOS updates" "🔄"
-  nohup sudo softwareupdate --download --all >/dev/null 2>&1 &
-  printf '  %s↗%s  Checking + downloading any updates in the background (not waiting).\n' "$CYAN" "$RESET"
-  printf '  %sInstall when you are ready: %ssudo softwareupdate -i -a%s%s  (or System Settings ▸ Software Update).%s\n' \
-    "$DIM" "$BOLD" "$RESET" "$DIM" "$RESET"
+# Plain sequential output when there's no terminal (logs / CI).
+stream() {
+  local i rc t0 dt logf cur=-1
+  for i in "${!T_LABEL[@]}"; do
+    [ "${T_STEP[$i]}" != "$cur" ] && { cur="${T_STEP[$i]}"; printf '\n%s %s\n' "${CIRCLED[$cur]}" "${STEP_NAME[$cur]}"; }
+    logf="$(mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM")"; t0=$SECONDS
+    ( run_task "$i" ) >"$logf" 2>&1; rc=$?
+    [ "${T_KIND[$i]}" = "homebrew" ] && [ "$rc" -ne 1 ] && _brew_shellenv
+    dt=$((SECONDS - t0)); [ "$dt" -ge 1 ] && T_TIME[$i]="$(fmt_secs "$dt")"
+    finish_task "$i" "$rc" "$logf"; rm -f "$logf"
+    case "${T_STAT[$i]}" in
+      ok)   printf '  + %s %s\n' "${T_LABEL[$i]}" "${T_TIME[$i]}" ;;
+      upd)  printf '  ^ %s (updated)\n' "${T_LABEL[$i]}" ;;
+      skip) printf '  . %s (skipped)\n' "${T_LABEL[$i]}" ;;
+      fail) printf '  x %s (failed)\n' "${T_LABEL[$i]}" ;;
+    esac
+  done
 }
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
-# Print one recap line: "Label (N)  a · b · c" from a newline-separated list.
-_recap_bucket() {
-  local label="$1" color="$2" names="$3"
-  local n=0 joined="" line
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    n=$((n + 1))
-    if [ -n "$joined" ]; then joined="$joined · $line"; else joined="$line"; fi
-  done <<EOF
-$names
-EOF
-  [ -z "$joined" ] && joined="—"
-  printf '  %s%-9s%s %s(%d)%s  %s\n' "$color" "$label" "$RESET" "$DIM" "$n" "$RESET" "$joined"
-}
-
 summary() {
-  printf '\n%s────────────────────────────────────────────────%s\n' "$DIM" "$RESET"
-  printf '%sSummary%s  %s✓ %d%s  %s⊘ %d%s  %s✗ %d%s   %s·%s  ⏱ %s\n' \
-    "$BOLD" "$RESET" "$GREEN" "$DONE" "$RESET" "$DIM" "$SKIPPED" "$RESET" \
-    "$RED" "$FAILED" "$RESET" "$DIM" "$RESET" "$(fmt_secs "$SECONDS")"
-
-  printf '\n%sRecap%s\n' "$BOLD" "$RESET"
-  _recap_bucket "Installed" "$GREEN" "$RECAP_INSTALLED"
-  _recap_bucket "Updated"   "$CYAN"  "$RECAP_UPDATED"
-  _recap_bucket "Skipped"   "$DIM"   "$RECAP_SKIPPED"
-  _recap_bucket "Failed"    "$RED"   "$RECAP_FAILED"
-
+  local upd; upd="$(_count "$RECAP_UPDATED")"
+  printf '\n  %s%s❖  my-setup%s  %s· done in %s%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$(fmt_secs "$SECONDS")" "$RESET"
+  printf '  %s%s✓ %d installed%s   %s↑ %d updated%s   %s⊘ %d skipped%s   %s✗ %d failed%s\n' \
+    "$GREEN" "$BOLD" $((DONE - upd)) "$RESET" "$CYAN" "$upd" "$RESET" \
+    "$MUTED" "$SKIPPED" "$RESET" "$RED" "$FAILED" "$RESET"
   if [ "$FAILED" -gt 0 ]; then
-    printf '\n%sFailure details:%s\n' "$YELLOW" "$RESET"
+    printf '\n  %sFailures — re-run to retry (finished steps are skipped):%s\n' "$YELLOW" "$RESET"
     sed 's/^/    /' "$ERR_LOG"
-    printf '%sRe-run to retry — finished steps are skipped automatically.%s\n' "$DIM" "$RESET"
   fi
-
-  printf '\n%sNext steps%s\n' "$BOLD" "$RESET"
-  printf '  1. Open a new terminal (or run: %sexec zsh%s) to load your new shell.\n' "$BOLD" "$RESET"
-  printf '  2. Powerlevel10k starts its setup wizard on first launch (or run: %sp10k configure%s).\n' "$BOLD" "$RESET"
-  printf '  3. Your apps are in %s/Applications%s — launch Docker once to finish its setup.\n' "$BOLD" "$RESET"
-  printf '  4. Start MongoDB when you need it: %sbrew services start mongodb-community%s\n' "$BOLD" "$RESET"
-  printf '\n%sDone. Enjoy your fresh Mac.%s\n\n' "$GREEN" "$RESET"
+  printf '\n'
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
-  banner
-  show_plan       # show the whole roadmap before anything runs
   preflight
-  prime_sudo      # one password prompt up front; everything after is unattended
-  ensure_homebrew
-  setup_git
-  setup_formulae
-  setup_casks
-  setup_zsh
-  setup_macos_settings
-  setup_appstore
-  setup_macos_update
+  printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
+  prime_sudo                      # one password prompt; Homebrew install is a step
+  build_tasks
+  if [ -t 1 ]; then engine; else stream; fi
   summary
 }
 

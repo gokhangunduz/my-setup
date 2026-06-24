@@ -12,51 +12,61 @@ Open Terminal on a fresh Mac and run:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gokhangunduz/my-setup/main/install.sh)"
 ```
 
-That's it. The script shows each step as it goes:
+That's it. It clears the screen and runs as a full-screen, app-like view with
+every step expanded so you always see what's done and what's coming:
 
 ```
-Applications
-  ✓  google-chrome
-  ✓  visual-studio-code
-  ⊘  figma (already installed)
-  ⠹  docker-desktop
-  ...
+  ✓ ④ 📦  Casks   17/17
+      ✓  google-chrome
+      ⊘  visual-studio-code             skipped
+      ✓  webstorm
+      ...
+  ✓ ⑧ 🔄  macOS Updates   2/2
+      ✓  Command Line Tools             started
+      ⊘  macOS                          skipped
 
-Summary   ✓ 18 installed   ⊘ 2 skipped   ✗ 0 failed
+  100%  43/43 tasks
+
+  ❖  my-setup  · done in 6m12s
+  ✓ 24 installed   ↑ 3 updated   ⊘ 16 skipped   ✗ 0 failed
 ```
+
+Each item shows its own state — `✓` installed, `↑` updated, `⊘` skipped (already
+current), `✗` failed. The view stays put when it's done; the cursor is yours again.
 
 ## What it installs
 
 | Category | Items |
 | --- | --- |
-| **Package manager** | Homebrew (with PATH wired into `~/.zprofile`) |
-| **CLI tools** | git (+ global config), node, python, mas, MongoDB Community (via the `mongodb/brew` tap) |
-| **Apps** | Google Chrome, Docker Desktop, VS Code, Postman, MongoDB Compass, Figma, Logitech Options+, BetterDisplay, ChatGPT, Google Gemini, Claude, Claude Code, Codex, TeamViewer, NVIDIA GeForce NOW |
+| **Homebrew** | Installed (or updated) as its own step, with PATH wired into `~/.zprofile` |
+| **Git** | git itself, then a global config (name/email, default branch, `pull.rebase false`) |
+| **Formulae** | node, python, postgresql, MongoDB Community (via the `mongodb/brew` tap), mas |
+| **Casks** | Google Chrome, VS Code, WebStorm, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Google Gemini, Claude, Claude Code, Codex, Logitech Options+, BetterDisplay, TeamViewer, NVIDIA GeForce NOW |
 | **Shell** | Oh My Zsh, zsh-autosuggestions, zsh-syntax-highlighting, Powerlevel10k |
-| **macOS settings** | Dark mode, Dock, Cmd+" window shortcut, firewall, battery/energy, local hostname |
-| **App Store** | Xcode, WhatsApp, Apple Developer — installed from the App Store via `mas` |
-| **macOS updates** | Starts a background `softwareupdate` download (no waiting, no restart) |
+| **macOS Settings** | Theme Mode (dark), App Icons, Dock, Shortcuts (`Cmd+"`), Firewall, Battery, Hostname |
+| **Mac App Store** | Xcode, WhatsApp, Apple Developer — installed from the App Store via `mas` |
+| **macOS Updates** | Command Line Tools and the macOS system, checked separately; available updates download in the background (no waiting, no restart) |
 
 To change the list, edit the `TAPS`, `FORMULAE`, `CASKS`, and `MAS_APPS` arrays
 at the top of [`install.sh`](install.sh) — they're the single source of truth.
 
-### macOS settings
+### macOS Settings
 
-Applies these with `defaults write` (no sudo, no permission prompts), in
-`setup_macos_settings`:
+Each setting is its own step, and every step checks the current state first — if
+it's already what you want, it shows `⊘ skipped` instead of reapplying:
 
-- **Dark mode** — dark interface + dark app icons (`AppleIconAppearanceTheme`,
-  macOS 26 Tahoe).
-- **Dock** — size and magnification (`tilesize` / `largesize`, eyeballed from a
-  screenshot; tweak the numbers). Applied live via `killall Dock`.
-- **Keyboard** — `Cmd+"` set to *Move focus to next window*, so it cycles the
+- **Theme Mode** — dark interface (`AppleInterfaceStyle`).
+- **App Icons** — dark app icons (`AppleIconAppearanceTheme`, macOS 26 Tahoe).
+- **Dock** — size and magnification (`tilesize` / `largesize`). Applied live via
+  `killall Dock`.
+- **Shortcuts** — `Cmd+"` set to *Move focus to next window*, so it cycles the
   windows of the active app (symbolic hotkey 27; default is `Cmd+\``).
 - **Firewall** — turned on via `socketfilterfw` (left alone if already on).
-- **Battery/energy** — dim on battery, never auto-sleep on AC, wake for network
-  only on power adapter (`pmset` `lessbright` / `sleep` / `womp`).
-- **Local hostname** — set to `gg.local` (`scutil --set LocalHostName`).
+- **Battery** — dim on battery, never auto-sleep on AC, wake for network only on
+  power adapter (`pmset` `lessbright` / `sleep` / `womp`).
+- **Hostname** — local hostname set to `gg.local` (`scutil --set LocalHostName`).
 
-Dark mode and the keyboard shortcut take effect at your **next login**; the Dock
+Theme Mode and the keyboard shortcut take effect at your **next login**; the Dock
 updates immediately.
 
 > Not automated (no supported CLI on macOS 26 — do these in the GUI): the
@@ -77,12 +87,14 @@ skipped, and Xcode is several GB so that download can take a while.
 
 ### macOS software updates
 
-The last step **kicks off** a macOS system-update download in the background
-(`softwareupdate --download --all`, detached) and moves on — it never makes you
-wait, never installs, and never restarts on its own. The download keeps running
-after the script ends. When you're ready, install with `sudo softwareupdate -i -a`
-or **System Settings ▸ General ▸ Software Update** (on Apple Silicon, system
-updates that need a restart are best done from the GUI).
+The last step runs `softwareupdate -l` **once** and splits the result into two
+separate checks — **Command Line Tools** and **macOS** — so you can see each one's
+state on its own row. Whatever is available is **downloaded in the background**
+(detached) and the script moves on — it never makes you wait, never installs, and
+never restarts on its own. If nothing is pending, the row shows `⊘ skipped`. The
+download keeps running after the script ends; install when you're ready with
+`sudo softwareupdate -i -a` or **System Settings ▸ General ▸ Software Update** (on
+Apple Silicon, system updates that need a restart are best done from the GUI).
 
 ## Why this exists (and what's different)
 
@@ -104,7 +116,7 @@ rewrite fixes the real culprits:
   Oh My Zsh runs `--unattended`, so it never touches sudo or `chsh`.
 - **Safe to re-run — and it updates.** Already-installed formulae/casks aren't
   just skipped: the script checks `brew outdated` and **upgrades** anything that
-  has a newer version (shown as `(update)`), leaving current ones as `up to date`.
+  has a newer version (shown as `↑`), leaving current ones as `⊘ skipped`.
   Re-running doubles as your update command.
 - **No more `source ~/.zshrc` from bash.** It just tells you to open a new
   terminal; `.zshrc` edits are idempotent (set, not append).
@@ -113,9 +125,9 @@ rewrite fixes the real culprits:
 ## Customizing
 
 No flags, no environment variables — the script just runs. To change anything,
-edit the lists at the top of [`install.sh`](install.sh): `FORMULAE`, `CASKS`,
-`MAS_APPS`, the git identity, or the `apply_default` lines in
-`setup_macos_settings`. That file is the single source of truth.
+edit the lists at the top of [`install.sh`](install.sh): `TAPS`, `FORMULAE`,
+`CASKS`, `MAS_APPS`, the git identity, or the `_*_prefs` functions for the macOS
+settings. That file is the single source of truth.
 
 ## Running it manually
 
