@@ -77,6 +77,10 @@ SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 ERR_LOG="$(mktemp -t mysetup-errors 2>/dev/null || echo /tmp/mysetup-errors.$$)"
 SUDO_KEEPALIVE_PID=""
 SUDO_PRIMED=0
+SUDOERS_FILE="/etc/sudoers.d/my-setup"
+SUDOERS_INSTALLED=0
+OUTDATED_FORMULAE=""
+OUTDATED_CASKS=""
 
 # Colors (auto-disabled when output isn't a terminal).
 if [ -t 1 ]; then
@@ -93,8 +97,10 @@ if [ -t 1 ]; then CR=$'\r'; CLR=$'\033[K'; else CR=""; CLR=""; fi
 
 cleanup() {
   [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
-  # Drop the cached sudo credential we obtained, so we don't leave the machine
-  # with an active sudo session after we exit.
+  # Revoke the temporary passwordless-sudo rule (see prime_sudo). This must always
+  # run, even on Ctrl-C, so we never leave the machine with an open sudo hole.
+  [ "$SUDOERS_INSTALLED" = "1" ] && sudo rm -f "$SUDOERS_FILE" 2>/dev/null
+  # Drop any cached sudo credential too.
   [ "$SUDO_PRIMED" = "1" ] && sudo -k 2>/dev/null
   [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
   rm -f "$ERR_LOG" 2>/dev/null
@@ -118,6 +124,11 @@ info() { printf '%s  %s%s\n' "$DIM" "$1" "$RESET"; }
 
 skip() {
   printf '  %s⊘%s  %s %s(already installed)%s\n' "$DIM" "$RESET" "$1" "$DIM" "$RESET"
+  SKIPPED=$((SKIPPED + 1))
+}
+
+uptodate() {
+  printf '  %s⊘%s  %s %s(up to date)%s\n' "$DIM" "$RESET" "$1" "$DIM" "$RESET"
   SKIPPED=$((SKIPPED + 1))
 }
 
@@ -192,9 +203,9 @@ ensure_homebrew() {
     BREW_PREFIX="$(brew --prefix)"
     skip "Homebrew"
   else
-    info "Installing Homebrew (non-interactive; sudo already primed above)."
-    # NONINTERACTIVE=1 skips the "Press RETURN" prompt. It relies on the sudo
-    # credential we primed in prime_sudo — otherwise the installer aborts.
+    info "Installing Homebrew..."
+    # NONINTERACTIVE=1 is Homebrew's own required flag to skip its "Press RETURN"
+    # prompt — it's hardcoded here, not something you set. Nothing else uses env.
     if NONINTERACTIVE=1 /bin/bash -c \
       "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
       printf '  %s✓%s  Homebrew\n' "$GREEN" "$RESET"
@@ -213,9 +224,10 @@ ensure_homebrew() {
   fi
 
   _run "Updating Homebrew" brew update
-  # Speed up the many installs that follow; brew is fresh now.
-  export HOMEBREW_NO_AUTO_UPDATE=1
-  export HOMEBREW_NO_ENV_HINTS=1
+
+  # Snapshot what's outdated so already-installed items get upgraded, not skipped.
+  OUTDATED_FORMULAE="$(brew outdated --formula --quiet 2>/dev/null)"
+  OUTDATED_CASKS="$(brew outdated --cask --quiet 2>/dev/null)"
 }
 
 # ── Git ──────────────────────────────────────────────────────────────────────
@@ -237,18 +249,24 @@ setup_git() {
 # ── Formulae & casks ─────────────────────────────────────────────────────────
 
 install_formula() {
-  if brew list --formula --versions "$1" >/dev/null 2>&1; then
-    skip "$1"
+  local name="$1"
+  if ! brew list --formula --versions "$name" >/dev/null 2>&1; then
+    _run "$name" brew install "$name"
+  elif printf '%s\n' "$OUTDATED_FORMULAE" | grep -qxF "$name"; then
+    _run "$name (update)" brew upgrade --formula "$name"
   else
-    _run "$1" brew install "$1"
+    uptodate "$name"
   fi
 }
 
 install_cask() {
-  if brew list --cask --versions "$1" >/dev/null 2>&1; then
-    skip "$1"
+  local name="$1"
+  if ! brew list --cask --versions "$name" >/dev/null 2>&1; then
+    _run "$name" brew install --cask "$name"
+  elif printf '%s\n' "$OUTDATED_CASKS" | grep -qxF "$name"; then
+    _run "$name (update)" brew upgrade --cask "$name"
   else
-    _run "$1" brew install --cask "$1"
+    uptodate "$name"
   fi
 }
 
@@ -260,34 +278,35 @@ setup_formulae() {
   done
 }
 
-# Prime sudo ONCE, up front, then keep the credential warm for the whole run.
-# This is what makes the rest non-interactive:
-#   - Homebrew's installer runs with NONINTERACTIVE=1, which checks sudo with
-#     `sudo -n` (never prompts). Without a cached credential it would abort with
-#     "Need sudo access on macOS", so we must prime first.
-#   - Priming before Homebrew also stops its installer from invalidating our
-#     sudo timestamp on exit (it only does that if sudo wasn't already active).
-#   - A few casks need sudo too; the warm credential covers them silently.
-# Net result: you type your password at most once, at the very start.
+# Ask for the password ONCE, then install a temporary passwordless-sudo rule for
+# this user (/etc/sudoers.d/my-setup) so nothing — Homebrew, casks like
+# logi-options+ whose installer needs root, softwareupdate — ever stops to prompt
+# again. The rule is revoked automatically when the script exits (see cleanup),
+# including on Ctrl-C. A timestamp keep-alive is the fallback if we can't write it.
 prime_sudo() {
   section "Administrator access"
-  if sudo -n true 2>/dev/null; then
-    info "sudo already available — no password needed."
-  else
-    printf '  You will be asked for your macOS password %s%sonce%s%s now, then the\n' \
-      "$BOLD" "$YELLOW" "$RESET" "$DIM"
-    printf '  rest runs unattended. Homebrew and some apps need administrator access.%s\n' "$RESET"
-    if ! sudo -v; then
-      printf '\n  %sCould not obtain administrator access. Homebrew requires it — aborting.%s\n' "$RED" "$RESET"
-      printf '  %sMake sure your account is an Administrator and try again.%s\n' "$DIM" "$RESET"
-      exit 1
-    fi
+  printf '  You will be asked for your macOS password %s%sonce%s%s now — after that the\n' \
+    "$BOLD" "$YELLOW" "$RESET" "$DIM"
+  printf '  whole run is unattended (no more prompts).%s\n' "$RESET"
+  if ! sudo -v; then
+    printf '\n  %sCould not obtain administrator access — aborting.%s\n' "$RED" "$RESET"
+    printf '  %sMake sure your account is an Administrator and try again.%s\n' "$DIM" "$RESET"
+    exit 1
   fi
   SUDO_PRIMED=1
-  # Refresh the timestamp every 60s (sudo's default grace is 5 min) until the
-  # script exits. The EXIT trap kills this immediately when we finish.
-  ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
-  SUDO_KEEPALIVE_PID=$!
+
+  # Try the passwordless rule (validated before it counts, so a bad write can't
+  # lock you out of sudo). If anything fails, fall back to a timestamp keep-alive.
+  if printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$(id -un)" | sudo tee "$SUDOERS_FILE" >/dev/null 2>&1 \
+     && sudo chmod 440 "$SUDOERS_FILE" 2>/dev/null \
+     && sudo visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then
+    SUDOERS_INSTALLED=1
+    info "Granted for this run — revoked automatically when it finishes."
+  else
+    sudo rm -f "$SUDOERS_FILE" 2>/dev/null
+    ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
+    SUDO_KEEPALIVE_PID=$!
+  fi
 }
 
 setup_casks() {
@@ -386,9 +405,10 @@ setup_appstore() {
 _install_omz() {
   local script; script="$(mktemp -t omz-install 2>/dev/null || echo "/tmp/omz.$$")"
   curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$script" || return 1
-  # RUNZSH=no / CHSH=no stop the installer from launching zsh or swapping the
-  # login shell mid-run — the exact bug that cut the old script short.
-  RUNZSH=no CHSH=no sh "$script" --unattended
+  # --unattended already sets RUNZSH=no and CHSH=no, so the installer won't launch
+  # zsh or change the login shell mid-run — the exact bug that cut the old script
+  # short. (No env vars needed.)
+  sh "$script" --unattended
   local rc=$?
   rm -f "$script"
   return $rc
@@ -438,54 +458,14 @@ setup_zsh() {
 
 # ── macOS software updates ───────────────────────────────────────────────────
 
-# Check for macOS system updates with the built-in `softwareupdate` tool and
-# download anything available. It never installs or restarts on its own — that's
-# left to you (a restart is disruptive, and on Apple Silicon Apple wants system
-# updates finished through the GUI). Runs last so a long download can't interrupt
-# the rest of the setup.
+# Kick off the macOS system-update download and move on — we do NOT wait for it.
+# `softwareupdate --download --all` checks for and downloads any updates; we run
+# it detached (nohup, in the background) so the download keeps going after the
+# script ends without ever blocking the run. Installing/restarting is left to you.
 setup_macos_update() {
   section "macOS updates"
-
-  local swu; swu="$(mktemp -t mysetup-swu 2>/dev/null || echo "/tmp/mysetup-swu.$$")"
-
-  # Listing contacts Apple and can take a while — show a spinner meanwhile.
-  softwareupdate -l >"$swu" 2>&1 &
-  local pid=$!
-  if [ -t 1 ]; then
-    command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null
-    local i=0
-    while kill -0 "$pid" 2>/dev/null; do
-      printf '\r  %s%s%s  Checking for updates\033[K' "$CYAN" "${SPINNER[i % ${#SPINNER[@]}]}" "$RESET"
-      i=$((i + 1)); sleep 0.08
-    done
-    command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
-  fi
-  wait "$pid"
-  printf '%s%s' "$CR" "$CLR"
-
-  if grep -qiE 'No new software available|No updates are available' "$swu"; then
-    printf '  %s✓%s  macOS is up to date\n' "$GREEN" "$RESET"
-    rm -f "$swu"
-    return
-  fi
-
-  printf '  Available updates:\n'
-  if grep -qiE 'Title:' "$swu"; then
-    grep -iE 'Title:' "$swu" | sed -E 's/.*Title: *([^,]*),?.*/    • \1/'
-  else
-    grep -E '^\s*\*' "$swu" | sed 's/^[[:space:]]*\*[[:space:]]*/    • /'
-  fi
-  rm -f "$swu"
-
-  # Download only — installing (and any restart) is left to you.
-  info "Downloading available updates (no install, no restart)..."
-  if sudo softwareupdate --download --all; then
-    printf '  %s✓%s  Updates downloaded.\n' "$GREEN" "$RESET"
-    DONE=$((DONE + 1))
-  else
-    printf '  %s✗%s  macOS update download\n' "$RED" "$RESET"
-    FAILED=$((FAILED + 1)); FAILED_ITEMS="${FAILED_ITEMS} macos-updates"
-  fi
+  nohup sudo softwareupdate --download --all >/dev/null 2>&1 &
+  printf '  %s↗%s  Checking + downloading any updates in the background (not waiting).\n' "$CYAN" "$RESET"
   printf '  %sInstall when you are ready: %ssudo softwareupdate -i -a%s%s  (or System Settings ▸ Software Update).%s\n' \
     "$DIM" "$BOLD" "$RESET" "$DIM" "$RESET"
 }

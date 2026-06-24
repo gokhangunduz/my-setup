@@ -35,7 +35,7 @@ Summary   ✓ 18 installed   ⊘ 2 skipped   ✗ 0 failed
 | **Shell** | Oh My Zsh, zsh-autosuggestions, zsh-syntax-highlighting, Powerlevel10k |
 | **macOS settings** | Dark mode, Dock size/magnification, a Cmd+" window shortcut, and opens the wallpaper picker |
 | **App Store** | Xcode, WhatsApp, Apple Developer — installed from the App Store via `mas` |
-| **macOS updates** | Checks for system updates via `softwareupdate` and downloads them |
+| **macOS updates** | Starts a background `softwareupdate` download (no waiting, no restart) |
 
 To change the list, edit the `FORMULAE`, `CASKS`, and `MAS_APPS` arrays at the
 top of [`install.sh`](install.sh) — they're the single source of truth.
@@ -72,11 +72,12 @@ skipped, and Xcode is several GB so that download can take a while.
 
 ### macOS software updates
 
-The last step checks for macOS system updates with the built-in `softwareupdate`
-tool and **downloads** anything available. It never installs or restarts on its
-own — when you're ready, finish with `sudo softwareupdate -i -a` or **System
-Settings ▸ General ▸ Software Update** (on Apple Silicon, system updates that
-need a restart are best done from the GUI).
+The last step **kicks off** a macOS system-update download in the background
+(`softwareupdate --download --all`, detached) and moves on — it never makes you
+wait, never installs, and never restarts on its own. The download keeps running
+after the script ends. When you're ready, install with `sudo softwareupdate -i -a`
+or **System Settings ▸ General ▸ Software Update** (on Apple Silicon, system
+updates that need a restart are best done from the GUI).
 
 ## Why this exists (and what's different)
 
@@ -85,21 +86,21 @@ rewrite fixes the real culprits:
 
 - **Oh My Zsh no longer hijacks the run.** Its installer normally ends by
   launching a new zsh (`exec zsh`), which replaced the running process and
-  silently killed every step after it. It now runs with `RUNZSH=no CHSH=no
-  --unattended`, so the script keeps going.
+  silently killed every step after it. It now runs with `--unattended`, so the
+  script keeps going.
 - **One failure no longer stops everything.** Each step runs independently. A
   missing cask or a hiccup is caught, reported at the end with its log, and the
   rest still installs.
-- **One password prompt, then unattended.** sudo is requested **once** at the
-  very start and kept warm for the whole run. This is deliberate: Homebrew's
-  installer runs with `NONINTERACTIVE=1`, which checks sudo with `sudo -n` and
-  would *abort* if no credential were cached — so we prime it first (which also
-  stops the installer from invalidating your sudo on exit). Oh My Zsh runs with
-  `--unattended`, so it never touches sudo or `chsh` at all. After you type your
-  password once, nothing else stops to ask.
-- **Safe to re-run.** Every step checks its state first, so finished work shows
-  as `⊘ already installed` instead of erroring or duplicating. Re-running is the
-  retry mechanism.
+- **One password prompt, then fully unattended.** sudo is asked **once** at the
+  start; the script then drops a temporary passwordless-sudo rule in
+  `/etc/sudoers.d/my-setup` and removes it on exit (even on Ctrl-C). Nothing else
+  ever prompts — not Homebrew, not casks whose installer needs root (e.g.
+  `logi-options+`, which used to hang on a hidden prompt), not `softwareupdate`.
+  Oh My Zsh runs `--unattended`, so it never touches sudo or `chsh`.
+- **Safe to re-run — and it updates.** Already-installed formulae/casks aren't
+  just skipped: the script checks `brew outdated` and **upgrades** anything that
+  has a newer version (shown as `(update)`), leaving current ones as `up to date`.
+  Re-running doubles as your update command.
 - **No more `source ~/.zshrc` from bash.** It just tells you to open a new
   terminal; `.zshrc` edits are idempotent (set, not append).
 - **Apple Silicon & Intel.** The Homebrew prefix is detected automatically.
