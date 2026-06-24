@@ -30,15 +30,15 @@ Summary   ✓ 18 installed   ⊘ 2 skipped   ✗ 0 failed
 | Category | Items |
 | --- | --- |
 | **Package manager** | Homebrew (with PATH wired into `~/.zprofile`) |
-| **CLI tools** | git (+ global config), node, mas |
-| **Apps** | Google Chrome, Docker Desktop, VS Code, Postman, Figma, Logitech Options+, BetterDisplay, ChatGPT, Google Gemini, Claude, Claude Code, Codex, TeamViewer, NVIDIA GeForce NOW |
+| **CLI tools** | git (+ global config), node, python, mas, MongoDB Community (via the `mongodb/brew` tap) |
+| **Apps** | Google Chrome, Docker Desktop, VS Code, Postman, MongoDB Compass, Figma, Logitech Options+, BetterDisplay, ChatGPT, Google Gemini, Claude, Claude Code, Codex, TeamViewer, NVIDIA GeForce NOW |
 | **Shell** | Oh My Zsh, zsh-autosuggestions, zsh-syntax-highlighting, Powerlevel10k |
-| **macOS settings** | Dark mode, Dock size/magnification, a Cmd+" window shortcut, and opens the wallpaper picker |
+| **macOS settings** | Dark mode, Dock, Cmd+" window shortcut, firewall, battery/energy, local hostname |
 | **App Store** | Xcode, WhatsApp, Apple Developer — installed from the App Store via `mas` |
 | **macOS updates** | Starts a background `softwareupdate` download (no waiting, no restart) |
 
-To change the list, edit the `FORMULAE`, `CASKS`, and `MAS_APPS` arrays at the
-top of [`install.sh`](install.sh) — they're the single source of truth.
+To change the list, edit the `TAPS`, `FORMULAE`, `CASKS`, and `MAS_APPS` arrays
+at the top of [`install.sh`](install.sh) — they're the single source of truth.
 
 ### macOS settings
 
@@ -51,14 +51,19 @@ Applies these with `defaults write` (no sudo, no permission prompts), in
   screenshot; tweak the numbers). Applied live via `killall Dock`.
 - **Keyboard** — `Cmd+"` set to *Move focus to next window*, so it cycles the
   windows of the active app (symbolic hotkey 27; default is `Cmd+\``).
+- **Firewall** — turned on via `socketfilterfw` (left alone if already on).
+- **Battery/energy** — dim on battery, never auto-sleep on AC, wake for network
+  only on power adapter (`pmset` `lessbright` / `sleep` / `womp`).
+- **Local hostname** — set to `gg.local` (`scutil --set LocalHostName`).
 
 Dark mode and the keyboard shortcut take effect at your **next login**; the Dock
 updates immediately.
 
-**Wallpaper** is the one thing that can't be automated: Apple's *Radial Blue* is
-a dynamic `.madesktop` and macOS 26 stores the choice in an opaque binary form
-with no supported CLI. So the script just **opens the Wallpaper settings pane** —
-pick *Radial Blue* there with one click.
+> Not automated (no supported CLI on macOS 26 — do these in the GUI): the
+> wallpaper (built-in dynamic wallpapers have no scriptable API), **iCloud
+> Photos** (tied to your Apple Account), and the **"Optimize video streaming on
+> battery"** toggle. Screen resolution also isn't changed automatically — it
+> needs a third-party tool and the right scaled mode per Mac model.
 
 ### Mac App Store apps
 
