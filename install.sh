@@ -71,6 +71,7 @@ MAS_APPS=(
 # Apps appended to the Dock, in this order, after whatever's already there. Missing
 # apps are skipped and present ones aren't re-added (uses the `dockutil` formula).
 DOCK_APPS=(
+  "/System/Applications/Utilities/Terminal.app"
   "/Applications/Visual Studio Code.app"
   "/Applications/Xcode.app"
   "/Applications/WebStorm.app"
@@ -82,7 +83,6 @@ DOCK_APPS=(
   "/Applications/Figma.app"
   "/Applications/Claude.app"
   "/Applications/Codex.app"
-  "/System/Applications/Utilities/Terminal.app"
   "/Applications/Gemini.app"
   "/Applications/ChatGPT.app"
   "/Applications/Google Chrome.app"
