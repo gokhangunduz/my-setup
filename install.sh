@@ -464,6 +464,7 @@ render_step() {
   local step="$1" badge="${STEP_BADGES[$1]}" icon="${STEP_ICONS[$1]}" name="${STEP_NAMES[$1]}"
   local total finished i head_glyph head_color
   read -r total finished <<<"$(step_progress "$step")"
+  total="${total:-0}"; finished="${finished:-0}"   # stay numeric even if interrupted
   if [ "$total" -gt 0 ] && [ "$finished" -ge "$total" ]; then head_glyph="✓"; head_color="$GREEN"
   elif [ "$step" -le "$ACTIVE_STEP" ]; then head_glyph="▸"; head_color="$ACCENT"
   else head_glyph="○"; head_color="$RULE"; fi
@@ -554,12 +555,28 @@ print_summary() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+# The live view redraws every step in place, so it needs a terminal tall enough to
+# hold the whole frame at once; otherwise it would scroll and stack frames. When
+# it won't fit (or output isn't a terminal), fall back to the plain stream.
+LIVE_VIEW_ROWS=0
+fits_live_view() {
+  [ -t 1 ] || return 1
+  local rows; rows="$(tput lines 2>/dev/null)"; case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
+  LIVE_VIEW_ROWS=$(( ${#TASK_LABEL[@]} + STEP_COUNT + 5 ))   # banner + headers + tasks + footer
+  [ "$rows" -ge "$LIVE_VIEW_ROWS" ]
+}
+
 main() {
   preflight
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
   acquire_sudo
   build_task_list
-  if [ -t 1 ]; then run_live_view; else run_plain_output; fi
+  if fits_live_view; then
+    run_live_view
+  else
+    [ -t 1 ] && printf '  %sTerminal is short — using plain output. For the live view, make it ≥ %d rows.%s\n' "$MUTED" "$LIVE_VIEW_ROWS" "$RESET"
+    run_plain_output
+  fi
   print_summary
 }
 
