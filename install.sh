@@ -157,6 +157,10 @@ format_duration() {
 # ── Task commands ────────────────────────────────────────────────────────────
 # Each returns 10 when already in the desired state (shown as ⊘ skipped).
 
+# A running task records its current action (installing/upgrading/…) here; the live
+# view reads it each frame and shows it next to the spinner.
+set_phase() { [ -n "$PHASE_FILE" ] && printf '%s' "$1" >"$PHASE_FILE"; }
+
 configure_git() {
   [ "$(git config --global user.name 2>/dev/null)" = "$GIT_NAME" ] \
     && [ "$(git config --global user.email 2>/dev/null)" = "$GIT_EMAIL" ] \
@@ -231,6 +235,7 @@ configure_dock() {
 # installed and ones already in the Dock; returns 10 when there's nothing to add.
 arrange_dock_apps() {
   command -v dockutil >/dev/null 2>&1 || return 10
+  set_phase arranging
   local app encoded added=0 current
   current="$(defaults read com.apple.dock persistent-apps 2>/dev/null)"
   for app in "${DOCK_APPS[@]}"; do
@@ -278,6 +283,7 @@ set_local_hostname() {
 
 # Final tidy-up: drop old Homebrew versions and the whole download cache.
 clean_caches() {
+  set_phase cleaning
   brew cleanup --prune=all -s >/dev/null 2>&1
   local cache; cache="$(brew --cache 2>/dev/null)"
   [ -n "$cache" ] && [ -d "$cache" ] && rm -rf "${cache:?}"/* 2>/dev/null
@@ -309,10 +315,12 @@ acquire_sudo() {
 # Homebrew: install if missing, else update; return 10 if already up to date.
 ensure_homebrew() {
   if command -v brew >/dev/null 2>&1; then
+    set_phase updating
     local output; output="$(brew update 2>&1)"
     printf '%s' "$output" | grep -qi 'already up-to-date' && return 10
     return 0
   fi
+  set_phase installing
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
   [ -x "$BREW_PREFIX/bin/brew" ] || command -v brew >/dev/null 2>&1
 }
@@ -375,8 +383,8 @@ build_task_list() {
 # Homebrew type (--formula/--cask). exit 0 installed · 11 upgraded · 10 current.
 ensure_brew_package() {
   local flag="$1" name="$2"
-  brew list "$flag" --versions "$name" >/dev/null 2>&1 || { brew install "$flag" "$name" || exit 1; exit 0; }
-  [ -n "$(brew outdated "$flag" "$name" 2>/dev/null)" ] && { brew upgrade "$flag" "$name" || exit 1; exit 11; }
+  brew list "$flag" --versions "$name" >/dev/null 2>&1 || { set_phase installing; brew install "$flag" "$name" || exit 1; exit 0; }
+  [ -n "$(brew outdated "$flag" "$name" 2>/dev/null)" ] && { set_phase upgrading; brew upgrade "$flag" "$name" || exit 1; exit 11; }
   exit 10
 }
 
@@ -387,21 +395,21 @@ run_task() {
     homebrew) ensure_homebrew; exit $? ;;
     fn)      "$arg"; exit $? ;;
     tap)     if brew tap 2>/dev/null | grep -qxF "$arg"; then brew trust --tap "$arg" >/dev/null 2>&1; exit 10; fi
-             brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
+             set_phase tapping; brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
     formula) ensure_brew_package --formula "$arg" ;;
     cask)    ensure_brew_package --cask "$arg" ;;
-    mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10; mas install "$arg"; exit $? ;;
-    clt)     softwareupdate -l >"$SWUPDATE_CACHE" 2>&1   # one query to Apple, cached for the macOS task
+    mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10; set_phase installing; mas install "$arg"; exit $? ;;
+    clt)     set_phase checking; softwareupdate -l >"$SWUPDATE_CACHE" 2>&1   # one query to Apple, cached for the macOS task
              local label; label="$(grep 'Label:' "$SWUPDATE_CACHE" 2>/dev/null | grep -i 'Command Line Tools' | sed -E 's/.*Label: *//; s/ *$//' | head -1)"
              [ -z "$label" ] && exit 10
-             nohup sudo softwareupdate --download "$label" >/dev/null 2>&1 & exit 0 ;;
-    macos)   local labels=() label
+             set_phase downloading; nohup sudo softwareupdate --download "$label" >/dev/null 2>&1 & exit 0 ;;
+    macos)   set_phase checking; local labels=() label
              while IFS= read -r label; do
                label="$(printf '%s' "$label" | sed -E 's/.*Label: *//; s/ *$//')"
                [ -n "$label" ] && labels+=("$label")
              done < <(grep 'Label:' "$SWUPDATE_CACHE" 2>/dev/null | grep -vi 'Command Line Tools')
              [ "${#labels[@]}" -eq 0 ] && exit 10
-             nohup sudo softwareupdate --download "${labels[@]}" >/dev/null 2>&1 & exit 0 ;;
+             set_phase downloading; nohup sudo softwareupdate --download "${labels[@]}" >/dev/null 2>&1 & exit 0 ;;
   esac
   exit 0
 }
@@ -421,6 +429,8 @@ record_result() {
 # ── Live full-screen view ────────────────────────────────────────────────────
 
 ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30
+ACTIVE_DETAIL=""     # live action word (installing/upgrading/…) for the running task
+PHASE_FILE=""        # the running subshell writes its current action to this file
 CLEAR_EOL=$'\033[K'   # clear to end of line so a shrinking line leaves no stale tail
 
 # Echo "<total> <finished>" for the tasks belonging to step $1.
@@ -439,7 +449,7 @@ render_task() {
   local glyph glyph_color detail detail_color="$MUTED"
   case "$status" in
     pending) glyph="○"; glyph_color="$RULE";   detail="" ;;
-    run)     glyph="${SPINNER[SPIN_FRAME % ${#SPINNER[@]}]}"; glyph_color="$ACCENT"; detail="" ;;
+    run)     glyph="${SPINNER[SPIN_FRAME % ${#SPINNER[@]}]}"; glyph_color="$ACCENT"; detail="$ACTIVE_DETAIL" ;;
     ok)      glyph="✓"; glyph_color="$GREEN";  detail="$elapsed" ;;
     upd)     glyph="↑"; glyph_color="$CYAN";   detail="${elapsed:-updated}" ;;
     skip)    glyph="⊘"; glyph_color="$MUTED";  detail="skipped" ;;
@@ -490,8 +500,8 @@ run_live_view() {
   printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
   local index pid code started log
   for index in "${!TASK_LABEL[@]}"; do
-    ACTIVE_STEP="${TASK_STEP[$index]}"; TASK_STATUS[$index]="run"
-    log="$(new_log_file)"; started=$SECONDS
+    ACTIVE_STEP="${TASK_STEP[$index]}"; TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
+    log="$(new_log_file)"; PHASE_FILE="$(new_log_file)"; : >"$PHASE_FILE"; started=$SECONDS
     ( run_task "$index" ) >"$log" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
@@ -499,9 +509,11 @@ run_live_view() {
         printf '\n[my-setup] task exceeded %ss — terminated so the run can continue\n' "$TASK_TIMEOUT" >>"$log"
         kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; break
       fi
+      [ -s "$PHASE_FILE" ] && ACTIVE_DETAIL="$(cat "$PHASE_FILE" 2>/dev/null)"   # live action word
       render; SPIN_FRAME=$((SPIN_FRAME + 1)); sleep 0.1
     done
     { wait "$pid"; } 2>/dev/null; code=$?
+    rm -f "$PHASE_FILE"
     complete_task "$index" "$code" "$log" "$started"; render
   done
   ACTIVE_STEP=99; render   # 99 = past the last step, so every header reads ✓
