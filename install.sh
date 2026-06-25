@@ -434,7 +434,7 @@ record_result() {
 
 # ── Live full-screen view ────────────────────────────────────────────────────
 
-ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30; RUNNING_INDEX=0
+ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30
 ACTIVE_DETAIL=""     # live action word (installing/upgrading/…) for the running task
 PHASE_FILE=""        # the running subshell writes its current action to this file
 CLEAR_EOL=$'\033[K'   # clear to end of line so a shrinking line leaves no stale tail
@@ -490,23 +490,9 @@ render_body() {
     "$CLEAR_EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
 }
 
-# Live frame, redrawn in place. The full view is taller than most terminals, so we
-# show a window of it that scrolls to keep the running task on screen — same layout,
-# never scrolling/stacking, on any terminal height.
-render() {
-  local FRAME=() ln; while IFS= read -r ln; do FRAME+=("$ln"); done < <(render_body)
-  local n=${#FRAME[@]} rows view start=0 i runline max
-  rows="$(tput lines 2>/dev/null)"; case "$rows" in ''|*[!0-9]*) rows=99999 ;; esac
-  view=$(( rows > 1 ? rows - 1 : 1 ))
-  if [ "$n" -gt "$view" ]; then
-    runline=$(( 3 + ${TASK_STEP[$RUNNING_INDEX]:-0} + RUNNING_INDEX ))   # line of the running task
-    start=$(( runline - view / 2 )); [ "$start" -lt 0 ] && start=0
-    max=$(( n - view )); [ "$start" -gt "$max" ] && start=$max
-  fi
-  printf '\033[H'
-  for (( i = start; i < start + view && i < n; i++ )); do printf '%s\n' "${FRAME[$i]}"; done
-  printf '\033[J'
-}
+# Redraw the whole frame in place: home, body, clear anything left below. No line
+# math — this is only ever used when the frame fits the terminal (see fits_live_view).
+render() { printf '\033[H'; render_body; printf '\033[J'; }
 
 new_log_file() { mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM"; }
 
@@ -524,7 +510,7 @@ run_live_view() {
   printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
   local index pid code started log
   for index in "${!TASK_LABEL[@]}"; do
-    ACTIVE_STEP="${TASK_STEP[$index]}"; RUNNING_INDEX="$index"; TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
+    ACTIVE_STEP="${TASK_STEP[$index]}"; TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
     log="$(new_log_file)"; PHASE_FILE="$(new_log_file)"; : >"$PHASE_FILE"; started=$SECONDS
     ( run_task "$index" ) >"$log" 2>&1 &
     pid=$!
@@ -579,12 +565,23 @@ print_summary() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+# Use the in-place dashboard only when the whole frame fits the terminal (banner +
+# step headers + every task + footer). Otherwise the plain stream, which scrolls
+# cleanly at any size. Just a height check — no per-line math.
+fits_live_view() {
+  [ -t 1 ] || return 1
+  local rows; rows="$(stty size 2>/dev/null | awk '{print $1}')"   # ioctl size; reliable
+  case "$rows" in ''|*[!0-9]*) rows="$(tput lines 2>/dev/null)" ;; esac
+  case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
+  [ "$rows" -ge "$(( ${#TASK_LABEL[@]} + STEP_COUNT + 5 ))" ]
+}
+
 main() {
   preflight
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
   acquire_sudo
   build_task_list
-  if [ -t 1 ]; then run_live_view; else run_plain_output; fi
+  if fits_live_view; then run_live_view; else run_plain_output; fi
   print_summary
 }
 
