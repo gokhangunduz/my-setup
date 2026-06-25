@@ -461,7 +461,7 @@ render_task() {
     skip)    glyph="⊘"; glyph_color="$MUTED";  detail="skipped" ;;
     fail)    glyph="✗"; glyph_color="$RED";    detail="failed"; detail_color="$RED" ;;
   esac
-  printf '      %s%s%s  %-*s %s%s%s%s\n' \
+  printf '      %s%s%s  %-*s %s%s%s%s' \
     "$glyph_color" "$glyph" "$RESET" "$LABEL_WIDTH" "$label" "$detail_color" "$detail" "$RESET" "$CLEAR_EOL"
 }
 
@@ -476,7 +476,7 @@ render_step() {
   else head_glyph="○"; head_color="$RULE"; fi
   printf '  %s%s%s %s %s  %s%s%s   %s%d/%d%s%s\n' \
     "$head_color" "$head_glyph" "$RESET" "$badge" "$icon" "$ACCENT$BOLD" "$name" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
-  for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && render_task "$i"; done
+  for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && { render_task "$i"; printf '\n'; }; done
 }
 
 # The whole frame as text (no cursor moves) — banner, every step, footer.
@@ -505,41 +505,66 @@ complete_task() {
   record_result "$index" "$code" "$log"; rm -f "$log"
 }
 
-# Interactive: full-screen view, one task at a time with a spinner + timeout.
+# Run one task in the background, polling at ~10fps with a timeout, calling the
+# frame hook ($2) each tick so a view can animate. Shared by all three renderers.
+drive_task() {
+  local index="$1" on_frame="$2" pid code started log
+  TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
+  log="$(new_log_file)"; PHASE_FILE="$(new_log_file)"; : >"$PHASE_FILE"; started=$SECONDS
+  ( run_task "$index" ) >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$((SECONDS - started))" -ge "$TASK_TIMEOUT" ]; then
+      printf '\n[my-setup] task exceeded %ss — terminated so the run can continue\n' "$TASK_TIMEOUT" >>"$log"
+      kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; break
+    fi
+    [ -s "$PHASE_FILE" ] && ACTIVE_DETAIL="$(cat "$PHASE_FILE" 2>/dev/null)"   # live action word
+    "$on_frame" "$index"; SPIN_FRAME=$((SPIN_FRAME + 1)); sleep 0.1
+  done
+  { wait "$pid"; } 2>/dev/null; code=$?
+  rm -f "$PHASE_FILE"
+  complete_task "$index" "$code" "$log" "$started"
+}
+
+# Interactive, terminal tall enough: the full-screen dashboard, redrawn in place.
 run_live_view() {
   printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
-  local index pid code started log
+  local index
   for index in "${!TASK_LABEL[@]}"; do
-    ACTIVE_STEP="${TASK_STEP[$index]}"; TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
-    log="$(new_log_file)"; PHASE_FILE="$(new_log_file)"; : >"$PHASE_FILE"; started=$SECONDS
-    ( run_task "$index" ) >"$log" 2>&1 &
-    pid=$!
-    while kill -0 "$pid" 2>/dev/null; do
-      if [ "$((SECONDS - started))" -ge "$TASK_TIMEOUT" ]; then
-        printf '\n[my-setup] task exceeded %ss — terminated so the run can continue\n' "$TASK_TIMEOUT" >>"$log"
-        kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; break
-      fi
-      [ -s "$PHASE_FILE" ] && ACTIVE_DETAIL="$(cat "$PHASE_FILE" 2>/dev/null)"   # live action word
-      render; SPIN_FRAME=$((SPIN_FRAME + 1)); sleep 0.1
-    done
-    { wait "$pid"; } 2>/dev/null; code=$?
-    rm -f "$PHASE_FILE"
-    complete_task "$index" "$code" "$log" "$started"; render
+    ACTIVE_STEP="${TASK_STEP[$index]}"
+    drive_task "$index" render
+    render
   done
   ACTIVE_STEP=99   # 99 = past the last step, so every header reads ✓
   printf '\033[2J\033[H'; render_body   # dump the whole finished view so it all persists
   printf '\033[?25h'; TUI_ACTIVE=0
 }
 
-# Non-interactive: plain sequential output (logs / CI).
+# Interactive, shorter terminal: a streaming log — each task animates in place on
+# one line (spinner + action), then commits to its final colored row and scrolls up.
+_stream_frame() { printf '\r'; render_task "$1"; }
+run_stream() {
+  printf '\033[?25l'; TUI_ACTIVE=1
+  local index current_step=-1
+  for index in "${!TASK_LABEL[@]}"; do
+    if [ "${TASK_STEP[$index]}" != "$current_step" ]; then
+      current_step="${TASK_STEP[$index]}"
+      printf '\n  %s%s%s %s  %s%s%s\n' \
+        "$ACCENT" "${STEP_BADGES[$current_step]}" "$RESET" "${STEP_ICONS[$current_step]}" "$ACCENT$BOLD" "${STEP_NAMES[$current_step]}" "$RESET"
+    fi
+    drive_task "$index" _stream_frame
+    printf '\r'; render_task "$index"; printf '\n'   # commit the final row
+  done
+  printf '\033[?25h'; TUI_ACTIVE=0
+}
+
+# Non-interactive (logs / CI): plain sequential lines, no cursor tricks.
 run_plain_output() {
-  local index code started log current_step=-1
+  local index current_step=-1
   for index in "${!TASK_LABEL[@]}"; do
     [ "${TASK_STEP[$index]}" != "$current_step" ] \
       && { current_step="${TASK_STEP[$index]}"; printf '\n%s %s\n' "${STEP_BADGES[$current_step]}" "${STEP_NAMES[$current_step]}"; }
-    log="$(new_log_file)"; started=$SECONDS
-    ( run_task "$index" ) >"$log" 2>&1; code=$?
-    complete_task "$index" "$code" "$log" "$started"
+    drive_task "$index" :
     case "${TASK_STATUS[$index]}" in
       ok)   printf '  + %s %s\n' "${TASK_LABEL[$index]}" "${TASK_TIME[$index]}" ;;
       upd)  printf '  ^ %s (updated)\n' "${TASK_LABEL[$index]}" ;;
@@ -569,7 +594,6 @@ print_summary() {
 # step headers + every task + footer). Otherwise the plain stream, which scrolls
 # cleanly at any size. Just a height check — no per-line math.
 fits_live_view() {
-  [ -t 1 ] || return 1
   local rows; rows="$(stty size 2>/dev/null | awk '{print $1}')"   # ioctl size; reliable
   case "$rows" in ''|*[!0-9]*) rows="$(tput lines 2>/dev/null)" ;; esac
   case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
@@ -581,7 +605,9 @@ main() {
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
   acquire_sudo
   build_task_list
-  if fits_live_view; then run_live_view; else run_plain_output; fi
+  if [ ! -t 1 ]; then run_plain_output            # logs / CI
+  elif fits_live_view; then run_live_view          # tall terminal: full dashboard
+  else run_stream; fi                              # shorter terminal: animated stream
   print_summary
 }
 
