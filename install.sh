@@ -213,11 +213,14 @@ _firewall_on() {
   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
 }
 _battery_prefs() {
-  local cust; cust="$(pmset -g custom 2>/dev/null)"
-  printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p' | grep -qE 'lessbright[[:space:]]+1' \
-    && printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p' | grep -qE 'womp[[:space:]]+0' \
-    && printf '%s' "$cust" | sed -n '/AC Power/,$p' | grep -qE '[^a-z]sleep[[:space:]]+0' \
-    && printf '%s' "$cust" | sed -n '/AC Power/,$p' | grep -qE 'womp[[:space:]]+1' && return 10
+  local cust bat ac
+  cust="$(pmset -g custom 2>/dev/null)"
+  bat="$(printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p')"   # battery section
+  ac="$(printf '%s' "$cust" | sed -n '/AC Power/,$p')"            # power-adapter section
+  printf '%s' "$bat" | grep -qE 'lessbright[[:space:]]+1' \
+    && printf '%s' "$bat" | grep -qE 'womp[[:space:]]+0' \
+    && printf '%s' "$ac" | grep -qE '[^a-z]sleep[[:space:]]+0' \
+    && printf '%s' "$ac" | grep -qE 'womp[[:space:]]+1' && return 10
   sudo pmset -b lessbright 1 &&   # dim on battery
   sudo pmset -c sleep 0 &&        # never auto-sleep on AC
   sudo pmset -c womp 1 &&         # wake for network on AC
@@ -405,12 +408,23 @@ render() {
   printf '\033[J'
 }
 
+_new_logf() { mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM"; }
+
+# Post-task bookkeeping shared by engine + stream: put brew on PATH after the
+# Homebrew step (parent side), record elapsed time, tally the result, drop the log.
+_finish_one() {
+  local i="$1" rc="$2" logf="$3" t0="$4" dt
+  [ "${T_KIND[$i]}" = "homebrew" ] && [ "$rc" -ne 1 ] && _brew_shellenv
+  dt=$((SECONDS - t0)); [ "$dt" -ge 1 ] && T_TIME[$i]="$(fmt_secs "$dt")"
+  finish_task "$i" "$rc" "$logf"; rm -f "$logf"
+}
+
 engine() {
   printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
-  local i pid rc t0 dt logf
+  local i pid rc t0 logf
   for i in "${!T_LABEL[@]}"; do
     ACTIVE_STEP="${T_STEP[$i]}"; T_STAT[$i]="run"
-    logf="$(mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM")"; t0=$SECONDS
+    logf="$(_new_logf)"; t0=$SECONDS
     ( run_task "$i" ) >"$logf" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
@@ -421,9 +435,7 @@ engine() {
       render; TFRAME=$((TFRAME + 1)); sleep 0.1
     done
     { wait "$pid"; } 2>/dev/null; rc=$?
-    [ "${T_KIND[$i]}" = "homebrew" ] && [ "$rc" -ne 1 ] && _brew_shellenv   # put brew on PATH (parent)
-    dt=$((SECONDS - t0)); [ "$dt" -ge 1 ] && T_TIME[$i]="$(fmt_secs "$dt")"
-    finish_task "$i" "$rc" "$logf"; rm -f "$logf"; render
+    _finish_one "$i" "$rc" "$logf" "$t0"; render
   done
   ACTIVE_STEP=99; render
   printf '\033[?25h'; TUI_ACTIVE=0
@@ -431,14 +443,12 @@ engine() {
 
 # Plain sequential output when there's no terminal (logs / CI).
 stream() {
-  local i rc t0 dt logf cur=-1
+  local i rc t0 logf cur=-1
   for i in "${!T_LABEL[@]}"; do
     [ "${T_STEP[$i]}" != "$cur" ] && { cur="${T_STEP[$i]}"; printf '\n%s %s\n' "${CIRCLED[$cur]}" "${STEP_NAME[$cur]}"; }
-    logf="$(mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM")"; t0=$SECONDS
+    logf="$(_new_logf)"; t0=$SECONDS
     ( run_task "$i" ) >"$logf" 2>&1; rc=$?
-    [ "${T_KIND[$i]}" = "homebrew" ] && [ "$rc" -ne 1 ] && _brew_shellenv
-    dt=$((SECONDS - t0)); [ "$dt" -ge 1 ] && T_TIME[$i]="$(fmt_secs "$dt")"
-    finish_task "$i" "$rc" "$logf"; rm -f "$logf"
+    _finish_one "$i" "$rc" "$logf" "$t0"
     case "${T_STAT[$i]}" in
       ok)   printf '  + %s %s\n' "${T_LABEL[$i]}" "${T_TIME[$i]}" ;;
       upd)  printf '  ^ %s (updated)\n' "${T_LABEL[$i]}" ;;
