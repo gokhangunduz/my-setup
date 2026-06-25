@@ -25,7 +25,7 @@ One password prompt up front, then it's unattended. Each item shows its own stat
 | **Homebrew** | Installed/updated, PATH wired into `~/.zprofile` |
 | **Git** | git + global config (name/email, default branch, `pull.rebase false`) |
 | **Formulae** | node, python, postgresql, sqlite, MongoDB Community (`mongodb/brew` tap), gh, hcloud, awscli, antidote, dockutil, mas |
-| **Casks** | Chrome, VS Code, WebStorm, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Gemini, Claude, Claude Code, Codex, Logi Options+, BetterDisplay, TeamViewer, GeForce NOW |
+| **Casks** | Chrome, VS Code, WebStorm, Cursor, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Gemini, Claude, Claude Code, Codex, Logi Options+, BetterDisplay, TeamViewer, GeForce NOW |
 | **Shell** | [antidote](https://antidote.sh) loading Powerlevel10k, zsh-autosuggestions/-syntax-highlighting/-completions, and Oh My Zsh plugins (git, brew, docker, gh, aws, npm, …) from `~/.zsh_plugins.txt` |
 | **macOS Settings** | Dark mode, app icons, Dock size, Dock apps (pinned in order via `dockutil`), `Cmd+"` shortcut, firewall, battery, hostname |
 | **Mac App Store** | Xcode, WhatsApp, Apple Developer (via `mas` — sign into the App Store first) |

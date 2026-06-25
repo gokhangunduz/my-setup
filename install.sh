@@ -40,6 +40,7 @@ CASKS=(
   # dev tools
   visual-studio-code
   webstorm
+  cursor
   docker-desktop
   postman
   # database GUIs
@@ -73,13 +74,14 @@ DOCK_APPS=(
   "/Applications/Visual Studio Code.app"
   "/Applications/Xcode.app"
   "/Applications/WebStorm.app"
-  "/Applications/Codex.app"
+  "/Applications/Cursor.app"
   "/Applications/Docker.app"
   "/Applications/Postman.app"
   "/Applications/pgAdmin 4.app"
   "/Applications/MongoDB Compass.app"
   "/Applications/Figma.app"
   "/Applications/Claude.app"
+  "/Applications/Codex.app"
   "/System/Applications/Utilities/Terminal.app"
   "/Applications/Gemini.app"
   "/Applications/ChatGPT.app"
