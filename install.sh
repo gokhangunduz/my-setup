@@ -1,33 +1,22 @@
 #!/usr/bin/env bash
 #
-# my-setup · fresh macOS bootstrap
-# https://github.com/gokhangunduz/my-setup
-#
-# Run on a brand-new Mac with a single command:
-#
+# my-setup · fresh macOS bootstrap — https://github.com/gokhangunduz/my-setup
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gokhangunduz/my-setup/main/install.sh)"
 #
-# Safe to re-run: every step checks its state first and skips what's already done.
-# No flags, no environment variables — it just runs. Edit the lists below to
-# change what gets installed.
+# Safe to re-run; edit the lists below to change what's installed.
 
-# No `set -e` (a failed step must never abort the run) and no `set -u` (an
-# unexpected unset/empty variable must never crash it either). Each task handles
-# its own success/failure and the run always moves on to the next one.
+# No set -e / -u: a failed step or unset variable must never abort the run.
 set -o pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
 # What to install — edit these lists to taste.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Extra Homebrew taps needed by some formulae below (tapped before installing).
 TAPS=(
   mongodb/brew
 )
 
-# Homebrew formulae (CLI tools + servers). `git` is added automatically.
-# `postgresql` / `python` are aliases that always point at the latest version;
-# mongodb-community is the latest MongoDB Community (from the mongodb/brew tap).
+# Homebrew formulae. `git` is added automatically; postgresql/python track latest.
 FORMULAE=(
   # runtimes
   node
@@ -44,7 +33,6 @@ FORMULAE=(
   mas
 )
 
-# Applications (Homebrew casks).
 CASKS=(
   # browser
   google-chrome
@@ -71,20 +59,15 @@ CASKS=(
   nvidia-geforce-now
 )
 
-# Mac App Store apps, installed with `mas`: "app-id|name". These come straight
-# from the App Store (not Homebrew). `mas` can't sign in for you, so you must
-# already be signed into the App Store app. Xcode is several GB — expect a wait.
+# Mac App Store apps via `mas`: "app-id|name". Sign into the App Store first.
 MAS_APPS=(
   "497799835|Xcode"
   "310633997|WhatsApp"
   "640199958|Apple Developer"
 )
 
-# Zsh plugins, managed by antidote (installed as a formula above). This list is
-# written verbatim to ~/.zsh_plugins.txt and antidote clones + loads everything on
-# first shell start. Oh My Zsh plugins load via `ohmyzsh/ohmyzsh path:plugins/<x>`
-# (the `path:lib` line pulls in the OMZ library they rely on). Order matters:
-# zsh-syntax-highlighting MUST stay last.
+# antidote plugin list → ~/.zsh_plugins.txt. OMZ plugins load via ohmyzsh/ohmyzsh
+# (use-omz + path:lib set them up). zsh-syntax-highlighting MUST stay last.
 ZSH_PLUGINS=(
   "getantidote/use-omz"
   "ohmyzsh/ohmyzsh path:lib"
@@ -104,7 +87,6 @@ ZSH_PLUGINS=(
   "zsh-users/zsh-syntax-highlighting"
 )
 
-# Git identity.
 GIT_NAME="gokhangunduz"
 GIT_EMAIL="me@gokhangunduz.dev"
 
@@ -112,17 +94,17 @@ GIT_EMAIL="me@gokhangunduz.dev"
 # Internals — you usually don't need to touch anything below here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-INSTALLED=0; UPDATED=0; SKIPPED=0; FAILED=0   # tallied per task, shown in the end card
+INSTALLED=0; UPDATED=0; SKIPPED=0; FAILED=0
 ERR_LOG="$(mktemp -t mysetup-errors 2>/dev/null || echo /tmp/mysetup-errors.$$)"
 SU_CACHE="$(mktemp -t mysetup-swupdate 2>/dev/null || echo /tmp/mysetup-swupdate.$$)"
 SUDO_KEEPALIVE_PID=""; SUDO_PRIMED=0
 SUDOERS_FILE="/etc/sudoers.d/my-setup"; SUDOERS_INSTALLED=0
-STEP_TIMEOUT=1800   # seconds: kill any single task that hangs longer, then continue
+STEP_TIMEOUT=1800   # seconds: kill any task that hangs longer, then continue
 TUI_ACTIVE=0
 SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 CIRCLED=(① ② ③ ④ ⑤ ⑥ ⑦ ⑧ ⑨ ⑩)
 
-# 256-color palette (disabled when not a terminal): violet accent + semantics.
+# 256-color palette, disabled when output isn't a terminal.
 if [ -t 1 ]; then
   BOLD=$'\033[1m'; RESET=$'\033[0m'
   ACCENT=$'\033[38;5;141m'; GREEN=$'\033[38;5;114m'; CYAN=$'\033[38;5;116m'
@@ -132,7 +114,7 @@ else
 fi
 
 cleanup() {
-  [ "$TUI_ACTIVE" = "1" ] && printf '\033[?25h'   # always free the cursor again
+  [ "$TUI_ACTIVE" = "1" ] && printf '\033[?25h'
   [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
   [ "$SUDOERS_INSTALLED" = "1" ] && sudo rm -f "$SUDOERS_FILE" 2>/dev/null
   [ "$SUDO_PRIMED" = "1" ] && sudo -k 2>/dev/null
@@ -143,9 +125,7 @@ trap cleanup EXIT INT TERM
 fmt_secs() { local s=$1; if [ "$s" -lt 60 ]; then printf '%ds' "$s"; else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi; }
 
 # ── Commands the tasks run ───────────────────────────────────────────────────
-
-# Every settings/config task returns 10 ("skip") when it's already in the desired
-# state, so re-runs don't redo work — and the live view shows ⊘ instead of ✓.
+# Each returns 10 when already in the desired state (shown as ⊘ skipped).
 
 _git_config() {
   [ "$(git config --global user.name 2>/dev/null)" = "$GIT_NAME" ] \
@@ -158,8 +138,6 @@ _git_config() {
   git config --global pull.rebase false
 }
 
-# ~/.zsh_plugins.txt is antidote's plugin list — we own it, so write it whole and
-# skip when it already matches.
 _configure_zsh_plugins() {
   local f="$HOME/.zsh_plugins.txt" tmp; tmp="$(mktemp)"
   printf '%s\n' "${ZSH_PLUGINS[@]}" >"$tmp"
@@ -167,8 +145,8 @@ _configure_zsh_plugins() {
   mv "$tmp" "$f"
 }
 
-# Our managed block inside ~/.zshrc, fenced by markers so we never clobber the
-# user's own lines. Keep these two strings free of regex-special characters.
+# Fenced block in ~/.zshrc so we never clobber the user's lines. Markers must stay
+# free of regex-special characters (they're used as awk patterns below).
 _ZRC_BEGIN="# my-setup antidote begin"
 _ZRC_END="# my-setup antidote end"
 _zshrc_block() {
@@ -184,9 +162,7 @@ for _ad in "${HOMEBREW_PREFIX:-/opt/homebrew}" /opt/homebrew /usr/local; do
 done
 unset _ad
 antidote load
-# Initialize completions (after plugins extended $fpath; use-omz queued OMZ compdefs).
 autoload -Uz compinit && compinit -u
-# Powerlevel10k prompt config — run `p10k configure` to (re)create it.
 [[ -f "$HOME/.p10k.zsh" ]] && source "$HOME/.p10k.zsh"
 # my-setup antidote end
 BLK
@@ -221,9 +197,8 @@ _dock_prefs() {
   defaults write com.apple.dock largesize -int 92
   killall Dock 2>/dev/null; return 0
 }
-# Cmd+" → "Move focus to next window" (symbolic hotkey 27). parameters =
-# (34 = ", 10 = its key code on this keyboard layout, 1048576 = Cmd) — captured
-# verbatim from System Settings; re-capture if your keyboard layout differs.
+# Cmd+" → "Move focus to next window" (hotkey 27). params = (34=", 10=key code on
+# this layout, 1048576=Cmd), captured from System Settings; re-capture if it differs.
 _keyboard_shortcut() {
   local p="$HOME/Library/Preferences/com.apple.symbolichotkeys.plist"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:0' "$p" 2>/dev/null)" = "34" ] \
@@ -243,9 +218,9 @@ _battery_prefs() {
     && printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p' | grep -qE 'womp[[:space:]]+0' \
     && printf '%s' "$cust" | sed -n '/AC Power/,$p' | grep -qE '[^a-z]sleep[[:space:]]+0' \
     && printf '%s' "$cust" | sed -n '/AC Power/,$p' | grep -qE 'womp[[:space:]]+1' && return 10
-  sudo pmset -b lessbright 1 &&   # dim the display on battery
-  sudo pmset -c sleep 0 &&        # never auto-sleep on power adapter
-  sudo pmset -c womp 1 &&         # wake for network access on power adapter
+  sudo pmset -b lessbright 1 &&   # dim on battery
+  sudo pmset -c sleep 0 &&        # never auto-sleep on AC
+  sudo pmset -c womp 1 &&         # wake for network on AC
   sudo pmset -b womp 0            # ...but not on battery
 }
 _hostname_set() {
@@ -260,8 +235,7 @@ preflight() {
   if [ "$(uname -m)" = "arm64" ]; then BREW_PREFIX="/opt/homebrew"; else BREW_PREFIX="/usr/local"; fi
 }
 
-# Ask for the password once, then drop a temporary passwordless-sudo rule so
-# nothing prompts again mid-run (revoked on exit, see cleanup).
+# One password prompt, then a temporary passwordless-sudo rule (revoked on exit).
 prime_sudo() {
   printf '  %s🔑  Enter your macOS password once — then it runs unattended.%s\n' "$MUTED" "$RESET"
   if ! sudo -v; then printf '  %s✗ Administrator access is required (your account must be an admin).%s\n' "$RED" "$RESET"; exit 1; fi
@@ -276,8 +250,7 @@ prime_sudo() {
   fi
 }
 
-# The single Homebrew task (runs in a subshell): install if missing, otherwise
-# update — and return 10 (skip) if it was already up to date.
+# Homebrew: install if missing, else update; return 10 if already up to date.
 _brew_ensure() {
   if command -v brew >/dev/null 2>&1; then
     local out; out="$(brew update 2>&1)"
@@ -287,8 +260,7 @@ _brew_ensure() {
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
   [ -x "$BREW_PREFIX/bin/brew" ] || command -v brew >/dev/null 2>&1
 }
-# Put brew on PATH for the rest of the run + future shells. Runs in the PARENT
-# (right after the install task) so the change actually sticks. Idempotent.
+# Put brew on PATH for the rest of the run + future shells. Runs in the PARENT.
 _brew_shellenv() {
   BREW_PREFIX="$(brew --prefix 2>/dev/null || echo "$BREW_PREFIX")"
   eval "$("$BREW_PREFIX/bin/brew" shellenv 2>/dev/null)"
@@ -297,11 +269,8 @@ _brew_shellenv() {
 }
 
 # ── Task model ───────────────────────────────────────────────────────────────
-# Eight steps; each owns an ordered list of tasks. Tasks are flat parallel arrays
-# so the renderer can group + count them per step.
+# Eight steps; tasks are flat parallel arrays so the renderer can group/count them.
 
-# Clean categories. Homebrew is a real step (install + update), not a hidden wait.
-# Each task is atomic — nothing is merged (git install and git config are separate).
 STEP_ICON=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄)
 STEP_NAME=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates")
 NSTEPS=${#STEP_NAME[@]}
@@ -311,20 +280,20 @@ add_task() { T_STEP+=("$1"); T_LABEL+=("$2"); T_KIND+=("$3"); T_ARG+=("$4"); T_S
 
 build_tasks() {
   local x id nm
-  # 0 · Homebrew — the package manager itself (install if missing, else update)
+  # 0 · Homebrew
   add_task 0 "package manager" homebrew ""
-  # 1 · Git — install, then configure (separate tasks)
+  # 1 · Git (install + config, separate tasks)
   add_task 1 "git" formula "git"
   add_task 1 "git config" fn _git_config
-  # 2 · Formulae — taps first, then CLI tools / servers
+  # 2 · Formulae (taps first)
   for x in "${TAPS[@]}"; do add_task 2 "tap ${x}" tap "$x"; done
   for x in "${FORMULAE[@]}"; do add_task 2 "$x" formula "$x"; done
-  # 3 · Casks — apps
+  # 3 · Casks
   for x in "${CASKS[@]}"; do add_task 3 "$x" cask "$x"; done
-  # 4 · Shell — Oh My Zsh, then plugins/theme, then .zshrc
+  # 4 · Shell (antidote plugin list + .zshrc)
   add_task 4 ".zsh_plugins.txt" fn _configure_zsh_plugins
   add_task 4 ".zshrc" fn _configure_zshrc
-  # 5 · macOS Settings — appearance, then input, then system
+  # 5 · macOS Settings
   add_task 5 "Theme Mode" fn _appearance_prefs
   add_task 5 "App Icons" fn _appicons_prefs
   add_task 5 "Dock" fn _dock_prefs
@@ -334,13 +303,13 @@ build_tasks() {
   add_task 5 "Hostname" fn _hostname_set
   # 6 · Mac App Store
   for x in "${MAS_APPS[@]}"; do id="${x%%|*}"; nm="${x##*|}"; add_task 6 "$nm" mas "$id"; done
-  # 7 · macOS Updates  (Command Line Tools + the macOS system, checked separately)
+  # 7 · macOS Updates (CLT + macOS, checked separately)
   add_task 7 "Command Line Tools" clt ""
   add_task 7 "macOS" macos ""
 }
 
-# Install $2 if missing, upgrade it if outdated, otherwise leave it. $1 is the
-# Homebrew type flag (--formula or --cask). exit 0 installed · 11 upgraded · 10 current.
+# Install $2 (--formula/--cask) if missing, upgrade if outdated, else leave it.
+# exit 0 installed · 11 upgraded · 10 current.
 _brew_pkg() {
   brew list "$1" --versions "$2" >/dev/null 2>&1 || { brew install "$1" "$2" || exit 1; exit 0; }
   [ -n "$(brew outdated "$1" "$2" 2>/dev/null)" ] && { brew upgrade "$1" "$2" || exit 1; exit 11; }
@@ -381,15 +350,15 @@ finish_task() {
     10) T_STAT[$i]="skip"; SKIPPED=$((SKIPPED + 1)) ;;
     *)  T_STAT[$i]="fail"; FAILED=$((FAILED + 1)); { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG" ;;
   esac
-  case "$kind" in clt|macos) [ "$rc" = 0 ] && T_TIME[$i]="started" ;; esac   # background download kicked off
+  case "$kind" in clt|macos) [ "$rc" = 0 ] && T_TIME[$i]="started" ;; esac
 }
 
 # ── Live full-screen view ────────────────────────────────────────────────────
 
 ACTIVE_STEP=0; TFRAME=0; TASK_W=30
-EOL=$'\033[K'   # clear to end of line, so a shrinking line leaves no stale tail
+EOL=$'\033[K'   # clear to EOL so a shrinking line leaves no stale tail
 
-_step_counts() {   # echoes "total done" for step $1
+_step_counts() {
   local s="$1" total=0 done=0 i
   for i in "${!T_STEP[@]}"; do
     [ "${T_STEP[$i]}" = "$s" ] || continue
@@ -412,8 +381,7 @@ render_task() {
   printf '      %s%s%s  %-*s %s%s%s%s\n' "$gc" "$g" "$RESET" "$TASK_W" "$label" "$sc" "$sec" "$RESET" "$EOL"
 }
 
-# Every step is always expanded: a header (✓ done / ▸ in progress / ○ upcoming)
-# plus all of its item rows, so the whole run is visible the entire time.
+# Every step stays expanded: header (✓ done / ▸ active / ○ upcoming) + all its rows.
 render_step() {
   local s="$1" badge="${CIRCLED[$s]}" icon="${STEP_ICON[$s]}" name="${STEP_NAME[$s]}"
   local cnt total done i hg hc; cnt="$(_step_counts "$s")"; total="${cnt% *}"; done="${cnt#* }"
@@ -429,16 +397,16 @@ render() {
   local td=0 tt="${#T_LABEL[@]}" pct=0 i s
   for i in "${!T_STAT[@]}"; do case "${T_STAT[$i]}" in ok|skip|upd|fail) td=$((td + 1)) ;; esac; done
   [ "$tt" -gt 0 ] && pct=$(( td * 100 / tt ))
-  printf '\033[H'   # home (alt screen)
+  printf '\033[H'
   printf '  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s%s\n%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET" "$EOL" "$EOL"
   for s in $(seq 0 $((NSTEPS - 1))); do render_step "$s"; done
   printf '%s\n  %s%d%%%s  %s%d/%d tasks%s%s\n' \
     "$EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$td" "$tt" "$RESET" "$EOL"
-  printf '\033[J'   # wipe anything left over from a taller previous frame
+  printf '\033[J'
 }
 
 engine() {
-  printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1   # clear the screen, home, hide cursor
+  printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
   local i pid rc t0 dt logf
   for i in "${!T_LABEL[@]}"; do
     ACTIVE_STEP="${T_STEP[$i]}"; T_STAT[$i]="run"
@@ -458,7 +426,7 @@ engine() {
     finish_task "$i" "$rc" "$logf"; rm -f "$logf"; render
   done
   ACTIVE_STEP=99; render
-  printf '\033[?25h'; TUI_ACTIVE=0   # done: the final view stays put, cursor is freed
+  printf '\033[?25h'; TUI_ACTIVE=0
 }
 
 # Plain sequential output when there's no terminal (logs / CI).
@@ -499,7 +467,7 @@ summary() {
 main() {
   preflight
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
-  prime_sudo                      # one password prompt; Homebrew install is a step
+  prime_sudo
   build_tasks
   if [ -t 1 ]; then engine; else stream; fi
   summary
