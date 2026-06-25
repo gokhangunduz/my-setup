@@ -4,6 +4,10 @@ My one-command bootstrap for a fresh macOS machine. Paste a single line into the
 terminal of a brand-new Mac and walk away — Homebrew, my CLI tools, my apps, and
 my zsh setup all install themselves with a live, state-aware progress view.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="my-setup running: every step expanded with live per-item state" width="420">
+</p>
+
 ## Quick start
 
 Open Terminal on a fresh Mac and run:
@@ -12,27 +16,11 @@ Open Terminal on a fresh Mac and run:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gokhangunduz/my-setup/main/install.sh)"
 ```
 
-That's it. It clears the screen and runs as a full-screen, app-like view with
-every step expanded so you always see what's done and what's coming:
-
-```
-  ✓ ④ 📦  Casks   17/17
-      ✓  google-chrome
-      ⊘  visual-studio-code             skipped
-      ✓  webstorm
-      ...
-  ✓ ⑧ 🔄  macOS Updates   2/2
-      ✓  Command Line Tools             started
-      ⊘  macOS                          skipped
-
-  100%  43/43 tasks
-
-  ❖  my-setup  · done in 6m12s
-  ✓ 24 installed   ↑ 3 updated   ⊘ 16 skipped   ✗ 0 failed
-```
-
+That's it. It clears the screen and runs as a full-screen, app-like view (shown
+above) with every step expanded, so you always see what's done and what's coming.
 Each item shows its own state — `✓` installed, `↑` updated, `⊘` skipped (already
-current), `✗` failed. The view stays put when it's done; the cursor is yours again.
+current), `✗` failed — and a running `done / total` tally with the elapsed time.
+The view stays put when it's finished; the cursor is yours again.
 
 ## What it installs
 
