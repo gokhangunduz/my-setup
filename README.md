@@ -1,8 +1,9 @@
 # my-setup
 
-One-command bootstrap for a fresh Mac. Paste one line, walk away — Homebrew, CLI
-tools, apps, macOS settings, and my zsh setup install themselves behind a live,
-state-aware progress view.
+Turn a brand-new Mac into my full dev machine with **one command** — Homebrew,
+~50 packages and apps, my zsh setup, macOS settings, and the Dock, all installed
+behind a live, app-like progress view. One password prompt, then it runs itself.
+Idempotent: re-run any time and it just updates what's stale.
 
 <p align="center">
   <img src="assets/screenshot.png" alt="my-setup running: every step expanded with live per-item state" width="100%">
@@ -14,7 +15,8 @@ state-aware progress view.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gokhangunduz/my-setup/main/install.sh)"
 ```
 
-One password prompt up front, then it's unattended. Each item shows its own state:
+It clears the screen and runs as a full-screen view — every step expanded, each
+item live with what it's doing (`installing`, `upgrading`, …) and its result:
 
 `✓` installed · `↑` updated · `⊘` skipped · `✗` failed
 
