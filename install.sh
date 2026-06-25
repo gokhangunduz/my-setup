@@ -335,8 +335,8 @@ add_brew_to_path() {
 # ── Task model ───────────────────────────────────────────────────────────────
 # Eight steps; tasks are flat parallel arrays so the renderer can group/count them.
 
-STEP_ICONS=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄 🧹)
-STEP_NAMES=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates" "Cleanup")
+STEP_ICONS=(🍺 🐙 🧰 📦 🛒 🐚 🎨 🔄 🧹)
+STEP_NAMES=("Homebrew" "Git" "Formulae" "Casks" "Mac App Store" "Shell" "macOS Settings" "macOS Updates" "Cleanup")
 STEP_COUNT=${#STEP_NAMES[@]}
 
 # Parallel arrays, one slot per task. status ∈ pending|run|ok|upd|skip|fail.
@@ -358,20 +358,20 @@ build_task_list() {
   for item in "${FORMULAE[@]}"; do add_task 2 "$item" formula "$item"; done
   # 3 · Casks
   for item in "${CASKS[@]}"; do add_task 3 "$item" cask "$item"; done
-  # 4 · Shell (antidote plugin list + .zshrc)
-  add_task 4 ".zsh_plugins.txt" fn write_zsh_plugins
-  add_task 4 ".zshrc" fn write_zshrc
-  # 5 · macOS Settings
-  add_task 5 "Theme Mode" fn enable_dark_mode
-  add_task 5 "App Icons" fn enable_dark_app_icons
-  add_task 5 "Dock Settings" fn configure_dock
-  add_task 5 "Dock Apps" fn arrange_dock_apps
-  add_task 5 "Shortcuts" fn set_next_window_shortcut
-  add_task 5 "Firewall" fn enable_firewall
-  add_task 5 "Battery" fn configure_power
-  add_task 5 "Hostname" fn set_local_hostname
-  # 6 · Mac App Store
-  for item in "${MAS_APPS[@]}"; do id="${item%%|*}"; name="${item##*|}"; add_task 6 "$name" mas "$id"; done
+  # 4 · Mac App Store — installs trigger here so the Dock step (later) can see them
+  for item in "${MAS_APPS[@]}"; do id="${item%%|*}"; name="${item##*|}"; add_task 4 "$name" mas "$id"; done
+  # 5 · Shell (antidote plugin list + .zshrc)
+  add_task 5 ".zsh_plugins.txt" fn write_zsh_plugins
+  add_task 5 ".zshrc" fn write_zshrc
+  # 6 · macOS Settings (Dock Apps last, after every app is installed/triggered)
+  add_task 6 "Theme Mode" fn enable_dark_mode
+  add_task 6 "App Icons" fn enable_dark_app_icons
+  add_task 6 "Dock Settings" fn configure_dock
+  add_task 6 "Dock Apps" fn arrange_dock_apps
+  add_task 6 "Shortcuts" fn set_next_window_shortcut
+  add_task 6 "Firewall" fn enable_firewall
+  add_task 6 "Battery" fn configure_power
+  add_task 6 "Hostname" fn set_local_hostname
   # 7 · macOS Updates (CLT + macOS, checked separately)
   add_task 7 "Command Line Tools" clt ""
   add_task 7 "macOS" macos ""
@@ -382,8 +382,9 @@ build_task_list() {
 # Install $name if missing, upgrade if outdated, else leave it. $flag is the
 # Homebrew type (--formula/--cask). exit 0 installed · 11 upgraded · 10 current.
 ensure_brew_package() {
-  local flag="$1" name="$2"
-  brew list "$flag" --versions "$name" >/dev/null 2>&1 || { set_phase installing; brew install "$flag" "$name" || exit 1; exit 0; }
+  local flag="$1" name="$2" extra=()
+  [ "$flag" = "--cask" ] && extra=(--adopt)   # take over an app that's already in /Applications
+  brew list "$flag" --versions "$name" >/dev/null 2>&1 || { set_phase installing; brew install "$flag" "${extra[@]}" "$name" || exit 1; exit 0; }
   [ -n "$(brew outdated "$flag" "$name" 2>/dev/null)" ] && { set_phase upgrading; brew upgrade "$flag" "$name" || exit 1; exit 11; }
   exit 10
 }
@@ -398,7 +399,12 @@ run_task() {
              set_phase tapping; brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
     formula) ensure_brew_package --formula "$arg" ;;
     cask)    ensure_brew_package --cask "$arg" ;;
-    mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10; set_phase installing; mas install "$arg"; exit $? ;;
+    mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10        # already installed → skip
+             set_phase downloading
+             nohup mas install "$arg" >/dev/null 2>&1 &              # trigger, don't wait for the (huge) download
+             local mpid=$!; sleep 2
+             kill -0 "$mpid" 2>/dev/null && exit 0                   # still downloading → started
+             wait "$mpid" 2>/dev/null && exit 0 || exit 10 ;;        # finished fast: ok, or not signed in → skip
     clt)     set_phase checking; softwareupdate -l >"$SWUPDATE_CACHE" 2>&1   # one query to Apple, cached for the macOS task
              local label; label="$(grep 'Label:' "$SWUPDATE_CACHE" 2>/dev/null | grep -i 'Command Line Tools' | sed -E 's/.*Label: *//; s/ *$//' | head -1)"
              [ -z "$label" ] && exit 10
@@ -423,7 +429,7 @@ record_result() {
     10) TASK_STATUS[$index]="skip"; SKIPPED=$((SKIPPED + 1)) ;;
     *)  TASK_STATUS[$index]="fail"; FAILED=$((FAILED + 1)); { printf '\n=== %s ===\n' "$label"; cat "$log"; } >>"$ERROR_LOG" ;;
   esac
-  case "$kind" in clt|macos) [ "$code" = 0 ] && TASK_TIME[$index]="started" ;; esac
+  case "$kind" in clt|macos|mas) [ "$code" = 0 ] && TASK_TIME[$index]="started" ;; esac
 }
 
 # ── Live full-screen view ────────────────────────────────────────────────────

@@ -28,9 +28,9 @@ item live with what it's doing (`installing`, `upgrading`, …) and its result:
 | **Git** | git + global config (name/email, default branch, `pull.rebase false`) |
 | **Formulae** | node, python, postgresql, sqlite, MongoDB Community (`mongodb/brew` tap), gh, hcloud, awscli, antidote, dockutil, mas |
 | **Casks** | Chrome, VS Code, WebStorm, Cursor, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Gemini, Claude, Claude Code, Codex, Logi Options+, BetterDisplay, TeamViewer, GeForce NOW |
+| **Mac App Store** | Xcode, WhatsApp, Apple Developer via `mas` — triggered in the background (no waiting on Xcode's download); skipped if you're not signed into the App Store |
 | **Shell** | [antidote](https://antidote.sh) loading Powerlevel10k, zsh-autosuggestions/-syntax-highlighting/-completions, and Oh My Zsh plugins (git, brew, docker, gh, aws, npm, …) from `~/.zsh_plugins.txt` |
 | **macOS Settings** | Dark mode, app icons, Dock size, Dock apps (pinned in order via `dockutil`), `Cmd+"` shortcut, firewall, battery, hostname |
-| **Mac App Store** | Xcode, WhatsApp, Apple Developer (via `mas` — sign into the App Store first) |
 | **macOS Updates** | Command Line Tools + macOS checked separately; available updates download in the background |
 | **Cleanup** | Runs last — prunes old Homebrew versions and the whole download cache |
 
