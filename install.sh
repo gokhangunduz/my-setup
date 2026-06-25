@@ -428,7 +428,7 @@ record_result() {
 
 # ── Live full-screen view ────────────────────────────────────────────────────
 
-ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30
+ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30; RUNNING_INDEX=0
 ACTIVE_DETAIL=""     # live action word (installing/upgrading/…) for the running task
 PHASE_FILE=""        # the running subshell writes its current action to this file
 CLEAR_EOL=$'\033[K'   # clear to end of line so a shrinking line leaves no stale tail
@@ -473,15 +473,32 @@ render_step() {
   for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && render_task "$i"; done
 }
 
-render() {
+# The whole frame as text (no cursor moves) — banner, every step, footer.
+render_body() {
   local finished=0 total="${#TASK_LABEL[@]}" pct=0 i step
   for i in "${!TASK_STATUS[@]}"; do case "${TASK_STATUS[$i]}" in ok|skip|upd|fail) finished=$((finished + 1)) ;; esac; done
   [ "$total" -gt 0 ] && pct=$(( finished * 100 / total ))
-  printf '\033[H'
   printf '  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s%s\n%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET" "$CLEAR_EOL" "$CLEAR_EOL"
   for step in $(seq 0 $((STEP_COUNT - 1))); do render_step "$step"; done
   printf '%s\n  %s%d%%%s  %s%d/%d tasks%s%s\n' \
     "$CLEAR_EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
+}
+
+# Live frame, redrawn in place. The full view is taller than most terminals, so we
+# show a window of it that scrolls to keep the running task on screen — same layout,
+# never scrolling/stacking, on any terminal height.
+render() {
+  local FRAME=() ln; while IFS= read -r ln; do FRAME+=("$ln"); done < <(render_body)
+  local n=${#FRAME[@]} rows view start=0 i runline max
+  rows="$(tput lines 2>/dev/null)"; case "$rows" in ''|*[!0-9]*) rows=99999 ;; esac
+  view=$(( rows > 1 ? rows - 1 : 1 ))
+  if [ "$n" -gt "$view" ]; then
+    runline=$(( 3 + ${TASK_STEP[$RUNNING_INDEX]:-0} + RUNNING_INDEX ))   # line of the running task
+    start=$(( runline - view / 2 )); [ "$start" -lt 0 ] && start=0
+    max=$(( n - view )); [ "$start" -gt "$max" ] && start=$max
+  fi
+  printf '\033[H'
+  for (( i = start; i < start + view && i < n; i++ )); do printf '%s\n' "${FRAME[$i]}"; done
   printf '\033[J'
 }
 
@@ -501,7 +518,7 @@ run_live_view() {
   printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
   local index pid code started log
   for index in "${!TASK_LABEL[@]}"; do
-    ACTIVE_STEP="${TASK_STEP[$index]}"; TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
+    ACTIVE_STEP="${TASK_STEP[$index]}"; RUNNING_INDEX="$index"; TASK_STATUS[$index]="run"; ACTIVE_DETAIL=""
     log="$(new_log_file)"; PHASE_FILE="$(new_log_file)"; : >"$PHASE_FILE"; started=$SECONDS
     ( run_task "$index" ) >"$log" 2>&1 &
     pid=$!
@@ -517,7 +534,8 @@ run_live_view() {
     rm -f "$PHASE_FILE"
     complete_task "$index" "$code" "$log" "$started"; render
   done
-  ACTIVE_STEP=99; render   # 99 = past the last step, so every header reads ✓
+  ACTIVE_STEP=99   # 99 = past the last step, so every header reads ✓
+  printf '\033[2J\033[H'; render_body   # dump the whole finished view so it all persists
   printf '\033[?25h'; TUI_ACTIVE=0
 }
 
@@ -555,28 +573,12 @@ print_summary() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-# The live view redraws every step in place, so it needs a terminal tall enough to
-# hold the whole frame at once; otherwise it would scroll and stack frames. When
-# it won't fit (or output isn't a terminal), fall back to the plain stream.
-LIVE_VIEW_ROWS=0
-fits_live_view() {
-  [ -t 1 ] || return 1
-  local rows; rows="$(tput lines 2>/dev/null)"; case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
-  LIVE_VIEW_ROWS=$(( ${#TASK_LABEL[@]} + STEP_COUNT + 5 ))   # banner + headers + tasks + footer
-  [ "$rows" -ge "$LIVE_VIEW_ROWS" ]
-}
-
 main() {
   preflight
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
   acquire_sudo
   build_task_list
-  if fits_live_view; then
-    run_live_view
-  else
-    [ -t 1 ] && printf '  %sTerminal is short — using plain output. For the live view, make it ≥ %d rows.%s\n' "$MUTED" "$LIVE_VIEW_ROWS" "$RESET"
-    run_plain_output
-  fi
+  if [ -t 1 ]; then run_live_view; else run_plain_output; fi
   print_summary
 }
 
