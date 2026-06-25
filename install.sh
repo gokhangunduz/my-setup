@@ -30,6 +30,7 @@ FORMULAE=(
   hcloud
   awscli
   antidote
+  dockutil
   mas
 )
 
@@ -64,6 +65,27 @@ MAS_APPS=(
   "497799835|Xcode"
   "310633997|WhatsApp"
   "640199958|Apple Developer"
+)
+
+# Apps appended to the Dock, in this order, after whatever's already there. Missing
+# apps are skipped and present ones aren't re-added (uses the `dockutil` formula).
+DOCK_APPS=(
+  "/Applications/Visual Studio Code.app"
+  "/Applications/Xcode.app"
+  "/Applications/WebStorm.app"
+  "/Applications/Codex.app"
+  "/Applications/Docker.app"
+  "/Applications/Postman.app"
+  "/Applications/pgAdmin 4.app"
+  "/Applications/MongoDB Compass.app"
+  "/Applications/Figma.app"
+  "/Applications/Claude.app"
+  "/System/Applications/Utilities/Terminal.app"
+  "/Applications/Gemini.app"
+  "/Applications/ChatGPT.app"
+  "/Applications/Google Chrome.app"
+  "/Applications/TeamViewer.app"
+  "/Applications/GeForceNOW.app"
 )
 
 # antidote plugin list → ~/.zsh_plugins.txt. OMZ plugins load via ohmyzsh/ohmyzsh
@@ -203,6 +225,21 @@ configure_dock() {
   defaults write com.apple.dock largesize -int 92
   killall Dock 2>/dev/null; return 0
 }
+# Append DOCK_APPS after the current Dock items, in order. Skips apps that aren't
+# installed and ones already in the Dock; returns 10 when there's nothing to add.
+arrange_dock_apps() {
+  command -v dockutil >/dev/null 2>&1 || return 10
+  local app encoded added=0 current
+  current="$(defaults read com.apple.dock persistent-apps 2>/dev/null)"
+  for app in "${DOCK_APPS[@]}"; do
+    [ -d "$app" ] || continue                                  # not installed → skip
+    encoded="$(printf '%s' "$app" | sed 's/ /%20/g')"          # match the plist's URL form
+    printf '%s' "$current" | grep -qF "$encoded" && continue   # already in the Dock
+    dockutil --add "$app" --no-restart >/dev/null 2>&1 && added=$((added + 1))
+  done
+  [ "$added" -eq 0 ] && return 10
+  killall Dock 2>/dev/null; return 0
+}
 # Cmd+" → "Move focus to next window" (hotkey 27). params = (34=", 10=key code on
 # this layout, 1048576=Cmd), captured from System Settings; re-capture if it differs.
 set_next_window_shortcut() {
@@ -235,6 +272,14 @@ configure_power() {
 set_local_hostname() {
   [ "$(scutil --get LocalHostName 2>/dev/null)" = "gg" ] && return 10
   sudo scutil --set LocalHostName gg
+}
+
+# Final tidy-up: drop old Homebrew versions and the whole download cache.
+clean_caches() {
+  brew cleanup --prune=all -s >/dev/null 2>&1
+  local cache; cache="$(brew --cache 2>/dev/null)"
+  [ -n "$cache" ] && [ -d "$cache" ] && rm -rf "${cache:?}"/* 2>/dev/null
+  return 0
 }
 
 # ── Preflight, sudo, Homebrew (prepare phase, before the live view) ──────────
@@ -280,8 +325,8 @@ add_brew_to_path() {
 # ── Task model ───────────────────────────────────────────────────────────────
 # Eight steps; tasks are flat parallel arrays so the renderer can group/count them.
 
-STEP_ICONS=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄)
-STEP_NAMES=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates")
+STEP_ICONS=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄 🧹)
+STEP_NAMES=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates" "Cleanup")
 STEP_COUNT=${#STEP_NAMES[@]}
 
 # Parallel arrays, one slot per task. status ∈ pending|run|ok|upd|skip|fail.
@@ -310,6 +355,7 @@ build_task_list() {
   add_task 5 "Theme Mode" fn enable_dark_mode
   add_task 5 "App Icons" fn enable_dark_app_icons
   add_task 5 "Dock" fn configure_dock
+  add_task 5 "Dock Apps" fn arrange_dock_apps
   add_task 5 "Shortcuts" fn set_next_window_shortcut
   add_task 5 "Firewall" fn enable_firewall
   add_task 5 "Battery" fn configure_power
@@ -319,6 +365,8 @@ build_task_list() {
   # 7 · macOS Updates (CLT + macOS, checked separately)
   add_task 7 "Command Line Tools" clt ""
   add_task 7 "macOS" macos ""
+  # 8 · Cleanup — runs last, after everything else
+  add_task 8 "caches" fn clean_caches
 }
 
 # Install $name if missing, upgrade if outdated, else leave it. $flag is the
