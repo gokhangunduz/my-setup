@@ -40,6 +40,7 @@ FORMULAE=(
   gh
   hcloud
   awscli
+  antidote
   mas
 )
 
@@ -79,24 +80,33 @@ MAS_APPS=(
   "640199958|Apple Developer"
 )
 
-# Oh My Zsh plugins / theme to git-clone into custom/: "label|destination|repo-url".
-# Built-in OMZ plugins (git, brew, docker, …) need no clone — list them in
-# ZSH_PLUGINS_VALUE below instead.
+# Zsh plugins, managed by antidote (installed as a formula above). This list is
+# written verbatim to ~/.zsh_plugins.txt and antidote clones + loads everything on
+# first shell start. Oh My Zsh plugins load via `ohmyzsh/ohmyzsh path:plugins/<x>`
+# (the `path:lib` line pulls in the OMZ library they rely on). Order matters:
+# zsh-syntax-highlighting MUST stay last.
 ZSH_PLUGINS=(
-  "zsh-autosuggestions|plugins/zsh-autosuggestions|https://github.com/zsh-users/zsh-autosuggestions"
-  "zsh-syntax-highlighting|plugins/zsh-syntax-highlighting|https://github.com/zsh-users/zsh-syntax-highlighting"
-  "zsh-completions|plugins/zsh-completions|https://github.com/zsh-users/zsh-completions"
-  "powerlevel10k|themes/powerlevel10k|https://github.com/romkatv/powerlevel10k"
+  "getantidote/use-omz"
+  "ohmyzsh/ohmyzsh path:lib"
+  "ohmyzsh/ohmyzsh path:plugins/git"
+  "ohmyzsh/ohmyzsh path:plugins/brew"
+  "ohmyzsh/ohmyzsh path:plugins/macos"
+  "ohmyzsh/ohmyzsh path:plugins/docker"
+  "ohmyzsh/ohmyzsh path:plugins/docker-compose"
+  "ohmyzsh/ohmyzsh path:plugins/gh"
+  "ohmyzsh/ohmyzsh path:plugins/aws"
+  "ohmyzsh/ohmyzsh path:plugins/npm"
+  "ohmyzsh/ohmyzsh path:plugins/node"
+  "ohmyzsh/ohmyzsh path:plugins/command-not-found"
+  "romkatv/powerlevel10k"
+  "zsh-users/zsh-completions"
+  "zsh-users/zsh-autosuggestions"
+  "zsh-users/zsh-syntax-highlighting"
 )
 
 # Git identity.
 GIT_NAME="gokhangunduz"
 GIT_EMAIL="me@gokhangunduz.dev"
-
-# Final .zshrc settings.
-ZSH_THEME_VALUE="powerlevel10k/powerlevel10k"
-# Built-in OMZ plugins + the cloned ones. zsh-syntax-highlighting MUST stay last.
-ZSH_PLUGINS_VALUE="git brew macos docker docker-compose gh aws npm node command-not-found zsh-completions zsh-autosuggestions zsh-syntax-highlighting"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Internals — you usually don't need to touch anything below here.
@@ -148,22 +158,50 @@ _git_config() {
   git config --global pull.rebase false
 }
 
-_install_omz() {
-  local s; s="$(mktemp -t omz 2>/dev/null || echo "/tmp/omz.$$")"
-  curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$s" || return 1
-  sh "$s" --unattended; local rc=$?; rm -f "$s"; return $rc   # --unattended ⇒ no exec zsh / no chsh
+# ~/.zsh_plugins.txt is antidote's plugin list — we own it, so write it whole and
+# skip when it already matches.
+_configure_zsh_plugins() {
+  local f="$HOME/.zsh_plugins.txt" tmp; tmp="$(mktemp)"
+  printf '%s\n' "${ZSH_PLUGINS[@]}" >"$tmp"
+  if [ -f "$f" ] && cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 10; fi
+  mv "$tmp" "$f"
+}
+
+# Our managed block inside ~/.zshrc, fenced by markers so we never clobber the
+# user's own lines. Keep these two strings free of regex-special characters.
+_ZRC_BEGIN="# my-setup antidote begin"
+_ZRC_END="# my-setup antidote end"
+_zshrc_block() {
+  cat <<'BLK'
+# my-setup antidote begin
+# Powerlevel10k instant prompt — keep this near the top.
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+# antidote — clones and loads every plugin listed in ~/.zsh_plugins.txt
+for _ad in "${HOMEBREW_PREFIX:-/opt/homebrew}" /opt/homebrew /usr/local; do
+  [[ -r "$_ad/share/antidote/antidote.zsh" ]] && { source "$_ad/share/antidote/antidote.zsh"; break; }
+done
+unset _ad
+antidote load
+# Initialize completions (after plugins extended $fpath; use-omz queued OMZ compdefs).
+autoload -Uz compinit && compinit -u
+# Powerlevel10k prompt config — run `p10k configure` to (re)create it.
+[[ -f "$HOME/.p10k.zsh" ]] && source "$HOME/.p10k.zsh"
+# my-setup antidote end
+BLK
 }
 
 _configure_zshrc() {
   local rc="$HOME/.zshrc"; [ -f "$rc" ] || touch "$rc"
-  grep -qF "ZSH_THEME=\"$ZSH_THEME_VALUE\"" "$rc" \
-    && grep -qF "plugins=($ZSH_PLUGINS_VALUE)" "$rc" && return 10
-  grep -q '^ZSH_THEME=' "$rc" \
-    && sed -i '' "s|^ZSH_THEME=.*|ZSH_THEME=\"$ZSH_THEME_VALUE\"|" "$rc" \
-    || printf '\nZSH_THEME="%s"\n' "$ZSH_THEME_VALUE" >>"$rc"
-  grep -q '^plugins=' "$rc" \
-    && sed -i '' "s|^plugins=.*|plugins=($ZSH_PLUGINS_VALUE)|" "$rc" \
-    || printf '\nplugins=(%s)\n' "$ZSH_PLUGINS_VALUE" >>"$rc"
+  local wantf curf tmp; wantf="$(mktemp)"; curf="$(mktemp)"
+  _zshrc_block >"$wantf"
+  awk -v b="$_ZRC_BEGIN" -v e="$_ZRC_END" '$0 ~ b {f=1} f {print} $0 ~ e {f=0}' "$rc" >"$curf"
+  if cmp -s "$wantf" "$curf"; then rm -f "$wantf" "$curf"; return 10; fi
+  tmp="$(mktemp)"
+  awk -v b="$_ZRC_BEGIN" -v e="$_ZRC_END" '$0 ~ b {skip=1} skip!=1 {print} $0 ~ e {skip=0}' "$rc" >"$tmp"
+  printf '\n' >>"$tmp"; cat "$wantf" >>"$tmp"
+  mv "$tmp" "$rc"; rm -f "$wantf" "$curf"
 }
 
 _appearance_prefs() {
@@ -284,8 +322,7 @@ build_tasks() {
   # 3 · Casks — apps
   for x in "${CASKS[@]}"; do add_task 3 "$x" cask "$x"; done
   # 4 · Shell — Oh My Zsh, then plugins/theme, then .zshrc
-  add_task 4 "oh-my-zsh" omz ""
-  for x in "${ZSH_PLUGINS[@]}"; do add_task 4 "${x%%|*}" plugin "$x"; done
+  add_task 4 ".zsh_plugins.txt" fn _configure_zsh_plugins
   add_task 4 ".zshrc" fn _configure_zshrc
   # 5 · macOS Settings — appearance, then input, then system
   add_task 5 "Theme Mode" fn _appearance_prefs
@@ -320,10 +357,6 @@ run_task() {
              brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
     formula) _brew_pkg --formula "$arg" ;;
     cask)    _brew_pkg --cask "$arg" ;;
-    omz)     [ -d "$HOME/.oh-my-zsh" ] && exit 10; _install_omz; exit $? ;;
-    plugin)  local d="${arg#*|}"; d="${d%%|*}"; local u="${arg##*|}"
-             [ -d "$HOME/.oh-my-zsh/custom/$d" ] && exit 10
-             git clone --depth=1 "$u" "$HOME/.oh-my-zsh/custom/$d"; exit $? ;;
     mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10; mas install "$arg"; exit $? ;;
     clt)     softwareupdate -l >"$SU_CACHE" 2>&1   # one query to Apple, cached for the macOS task
              local lbl; lbl="$(grep 'Label:' "$SU_CACHE" 2>/dev/null | grep -i 'Command Line Tools' | sed -E 's/.*Label: *//; s/ *$//' | head -1)"

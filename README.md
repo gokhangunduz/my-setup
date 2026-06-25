@@ -42,7 +42,7 @@ current), `✗` failed. The view stays put when it's done; the cursor is yours a
 | **Git** | git itself, then a global config (name/email, default branch, `pull.rebase false`) |
 | **Formulae** | node, python, postgresql, sqlite, MongoDB Community (via the `mongodb/brew` tap), gh, hcloud, awscli, mas |
 | **Casks** | Google Chrome, VS Code, WebStorm, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Google Gemini, Claude, Claude Code, Codex, Logitech Options+, BetterDisplay, TeamViewer, NVIDIA GeForce NOW |
-| **Shell** | Oh My Zsh + Powerlevel10k; cloned plugins (zsh-autosuggestions, zsh-syntax-highlighting, zsh-completions) and built-in ones enabled in `plugins=()` (git, brew, macos, docker, gh, aws, npm, node, …) |
+| **Shell** | [antidote](https://antidote.sh) plugin manager driving `~/.zsh_plugins.txt`: Powerlevel10k, zsh-autosuggestions, zsh-syntax-highlighting, zsh-completions, and Oh My Zsh plugins (git, brew, macos, docker, gh, aws, npm, node, …) loaded via `ohmyzsh/ohmyzsh` |
 | **macOS Settings** | Theme Mode (dark), App Icons, Dock, Shortcuts (`Cmd+"`), Firewall, Battery, Hostname |
 | **Mac App Store** | Xcode, WhatsApp, Apple Developer — installed from the App Store via `mas` |
 | **macOS Updates** | Command Line Tools and the macOS system, checked separately; available updates download in the background (no waiting, no restart) |
@@ -101,10 +101,12 @@ Apple Silicon, system updates that need a restart are best done from the GUI).
 This started as a plain `&&`-chained gist. It kept breaking halfway through. The
 rewrite fixes the real culprits:
 
-- **Oh My Zsh no longer hijacks the run.** Its installer normally ends by
-  launching a new zsh (`exec zsh`), which replaced the running process and
-  silently killed every step after it. It now runs with `--unattended`, so the
-  script keeps going.
+- **Zsh plugins are managed by [antidote](https://antidote.sh), not Oh My Zsh's
+  installer.** The OMZ installer used to end by launching a new zsh (`exec zsh`),
+  which replaced the running process and silently killed every step after it.
+  There's no OMZ install step anymore: antidote (a Homebrew formula) clones and
+  loads everything — including the Oh My Zsh plugins — from `~/.zsh_plugins.txt`
+  on first shell start. Nothing hijacks the run.
 - **One failure no longer stops everything.** Each step runs independently. A
   missing cask or a hiccup is caught, reported at the end with its log, and the
   rest still installs.
@@ -113,13 +115,13 @@ rewrite fixes the real culprits:
   `/etc/sudoers.d/my-setup` and removes it on exit (even on Ctrl-C). Nothing else
   ever prompts — not Homebrew, not casks whose installer needs root (e.g.
   `logi-options+`, which used to hang on a hidden prompt), not `softwareupdate`.
-  Oh My Zsh runs `--unattended`, so it never touches sudo or `chsh`.
 - **Safe to re-run — and it updates.** Already-installed formulae/casks aren't
   just skipped: the script checks `brew outdated` and **upgrades** anything that
   has a newer version (shown as `↑`), leaving current ones as `⊘ skipped`.
   Re-running doubles as your update command.
-- **No more `source ~/.zshrc` from bash.** It just tells you to open a new
-  terminal; `.zshrc` edits are idempotent (set, not append).
+- **`.zshrc` is edited safely.** my-setup writes only a fenced block
+  (`# my-setup antidote begin … end`); your own lines are left untouched, and the
+  block is regenerated only when it changes (otherwise the step shows `⊘ skipped`).
 - **Apple Silicon & Intel.** The Homebrew prefix is detected automatically.
 
 ## Customizing
@@ -142,7 +144,9 @@ less install.sh   # read it first
 
 ## After it finishes
 
-1. Open a new terminal (or `exec zsh`) to load the new shell.
+1. Open a new terminal. The **first** start runs a little long — antidote clones
+   every plugin (Oh My Zsh, Powerlevel10k, the zsh-users plugins) once; later
+   starts are fast. Update plugins anytime with `antidote update`.
 2. Powerlevel10k's setup wizard starts on first launch — or run `p10k configure`.
 3. Launch Docker Desktop once to complete its first-run setup.
 
