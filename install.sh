@@ -490,7 +490,8 @@ _framed() {
     "$CLEAR_EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
 }
 
-# Full: every step expanded (header + all its task rows). For tall terminals.
+# Full: every step expanded (header + all its task rows). Used for the final dump,
+# where scrollback can hold the whole list so every result persists.
 _steps_full() {
   local step i
   for step in $(seq 0 $((STEP_COUNT - 1))); do
@@ -498,33 +499,68 @@ _steps_full() {
     for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && render_task "$i"; done
   done
 }
-render_body() { _framed _steps_full; }
+render_full() { _framed _steps_full; }
 
-# Compact: one line per step; the active step shows its current item inline. Fixed
-# ~13 lines, so it fits any terminal without windowing/line math.
-_steps_compact() {
-  local step extra
+# Accordion: finished and upcoming steps collapse to their one-line header; only
+# the active step expands to show its task rows. The live frame stays short enough
+# to fit any real terminal while still showing what's happening right now.
+ACTIVE_BUDGET=0   # rows the active step may show this frame; 0 = unbounded (show all)
+_steps_accordion() {
+  local step
   for step in $(seq 0 $((STEP_COUNT - 1))); do
-    extra=""
-    [ "$step" = "$ACTIVE_STEP" ] && extra="$(printf '   %s· %s %s%s' "$MUTED" "${TASK_LABEL[$RUNNING_INDEX]}" "$ACTIVE_DETAIL" "$RESET")"
-    _step_header "$step" "$extra"
+    _step_header "$step" ""
+    [ "$step" = "$ACTIVE_STEP" ] && _active_rows "$step" "$ACTIVE_BUDGET"
   done
 }
-render_compact() { _framed _steps_compact; }
 
-# True when the full expanded frame fits the terminal (reliable ioctl size).
-frame_fits() {
-  local rows; rows="$(stty size 2>/dev/null | awk '{print $1}')"
-  case "$rows" in ''|*[!0-9]*) rows="$(tput lines 2>/dev/null)" ;; esac
-  case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
-  [ "$rows" -ge "$(( ${#TASK_LABEL[@]} + STEP_COUNT + 5 ))" ]
+# The active step's task rows, windowed to $2 lines around the running task. A
+# generous budget shows every row; when space is tight the window scrolls to keep
+# the running task visible and an ⋮ marker stands in for the rows hidden each end.
+_active_rows() {
+  local step="$1" budget="$2" rows=() i
+  for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && rows+=("$i"); done
+  local n=${#rows[@]}
+  if [ "$budget" -lt 1 ] || [ "$n" -le "$budget" ]; then
+    for i in "${rows[@]}"; do render_task "$i"; done; return
+  fi
+  local pos=0 k
+  for k in "${!rows[@]}"; do [ "${rows[$k]}" = "$RUNNING_INDEX" ] && { pos=$k; break; }; done
+  local start=$(( pos - budget / 2 )); [ "$start" -lt 0 ] && start=0
+  local maxstart=$(( n - budget )); [ "$start" -gt "$maxstart" ] && start=$maxstart
+  local end=$(( start + budget )) above=$start below=$(( n - start - budget ))
+  for (( k = start; k < end; k++ )); do
+    if [ "$k" -eq "$start" ] && [ "$above" -gt 0 ]; then
+      printf '      %s⋮ %d more%s%s\n' "$MUTED" "$above" "$RESET" "$CLEAR_EOL"
+    elif [ "$k" -eq "$((end - 1))" ] && [ "$below" -gt 0 ]; then
+      printf '      %s⋮ %d more%s%s\n' "$MUTED" "$below" "$RESET" "$CLEAR_EOL"
+    else
+      render_task "${rows[$k]}"
+    fi
+  done
+}
+render_live() { _framed _steps_accordion; }
+
+# Terminal height via ioctl (reliable); 0 when unknown (piped stdin, no tty).
+term_rows() {
+  local r; r="$(stty size 2>/dev/null | awk '{print $1}')"
+  case "$r" in ''|*[!0-9]*) r="$(tput lines 2>/dev/null)" ;; esac
+  case "$r" in ''|*[!0-9]*) r=0 ;; esac
+  printf '%s' "$r"
 }
 
-# The body sized to the terminal: full when it fits, compact otherwise.
-render_fit() { if frame_fits; then render_body; else render_compact; fi; }
-
-# One in-place redraw on the alternate screen: home, body that fits, clear below.
-render() { printf '\033[H'; render_fit; printf '\033[J'; }
+# One in-place redraw on the alternate screen. The accordion's fixed overhead is the
+# banner, footer and one header per step; whatever height is left is the active
+# step's row budget, so the frame never outgrows the terminal (recomputed each tick,
+# so a mid-run resize just changes how much of the active step shows).
+render() {
+  local rows; rows="$(term_rows)"
+  if [ "$rows" -gt 0 ]; then
+    ACTIVE_BUDGET=$(( rows - STEP_COUNT - 5 )); [ "$ACTIVE_BUDGET" -lt 1 ] && ACTIVE_BUDGET=1
+  else
+    ACTIVE_BUDGET=0
+  fi
+  printf '\033[H'; render_live; printf '\033[J'
+}
 
 new_log_file() { mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM"; }
 
@@ -559,9 +595,10 @@ drive_task() {
 }
 
 # Interactive view. Runs on the ALTERNATE screen buffer: the user can't scroll it
-# out of alignment and the scrollback stays clean. Full dashboard when it fits,
-# compact (one line per step) otherwise. On exit we restore the real screen and
-# print the finished result there, so it persists and the cursor is free.
+# out of alignment and the scrollback stays clean. Each frame is an accordion —
+# finished/upcoming steps collapsed to one line, the active step expanded — so it
+# fits any terminal. On exit we restore the real screen and dump the full expanded
+# list there, so every per-item result persists and the cursor is free.
 run_live_view() {
   printf '\033[?1049h\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
   local index
@@ -571,7 +608,7 @@ run_live_view() {
     render
   done
   printf '\033[?25h\033[?1049l'; TUI_ACTIVE=0   # cursor back, leave the alt screen
-  ACTIVE_STEP=99; render_fit                     # finished result on the real screen
+  ACTIVE_STEP=99; render_full                    # full per-item results on the real screen
 }
 
 # Non-interactive (logs / CI): plain sequential lines, no cursor tricks.
