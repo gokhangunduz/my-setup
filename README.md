@@ -15,8 +15,10 @@ Idempotent: re-run any time and it just updates what's stale.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gokhangunduz/my-setup/main/install.sh)"
 ```
 
-It clears the screen and runs as a full-screen view — every step expanded, each
-item live with what it's doing (`installing`, `upgrading`, …) and its result:
+It runs on the terminal's alternate screen (your scrollback stays clean, and
+scrolling can't disturb it). Tall terminals get the full dashboard above; shorter
+ones get a compact one-line-per-step view — each item live with what it's doing
+(`installing`, `upgrading`, …) and its result:
 
 `✓` installed · `↑` updated · `⊘` skipped · `✗` failed
 

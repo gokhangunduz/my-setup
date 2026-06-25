@@ -140,7 +140,7 @@ else
 fi
 
 cleanup() {
-  [ "$TUI_ACTIVE" = "1" ] && printf '\033[?25h'
+  [ "$TUI_ACTIVE" = "1" ] && printf '\033[?25h\033[?1049l'   # cursor back, leave alt screen
   [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
   [ "$SUDOERS_INSTALLED" = "1" ] && sudo rm -f "$SUDOERS_FILE" 2>/dev/null
   [ "$SUDO_AUTHENTICATED" = "1" ] && sudo -k 2>/dev/null
@@ -434,7 +434,7 @@ record_result() {
 
 # ── Live full-screen view ────────────────────────────────────────────────────
 
-ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30
+ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30; RUNNING_INDEX=0
 ACTIVE_DETAIL=""     # live action word (installing/upgrading/…) for the running task
 PHASE_FILE=""        # the running subshell writes its current action to this file
 CLEAR_EOL=$'\033[K'   # clear to end of line so a shrinking line leaves no stale tail
@@ -461,38 +461,70 @@ render_task() {
     skip)    glyph="⊘"; glyph_color="$MUTED";  detail="skipped" ;;
     fail)    glyph="✗"; glyph_color="$RED";    detail="failed"; detail_color="$RED" ;;
   esac
-  printf '      %s%s%s  %-*s %s%s%s%s' \
+  printf '      %s%s%s  %-*s %s%s%s%s\n' \
     "$glyph_color" "$glyph" "$RESET" "$LABEL_WIDTH" "$label" "$detail_color" "$detail" "$RESET" "$CLEAR_EOL"
 }
 
-# Every step stays expanded: header (✓ done / ▸ active / ○ upcoming) + all its rows.
-render_step() {
-  local step="$1" badge="${STEP_BADGES[$1]}" icon="${STEP_ICONS[$1]}" name="${STEP_NAMES[$1]}"
-  local total finished i head_glyph head_color
+# Step header: ✓ done / ▸ active / ○ upcoming, with progress and an optional
+# trailing note ($2 — the compact view uses it to show the running item inline).
+_step_header() {
+  local step="$1" extra="$2" total finished glyph color
   read -r total finished <<<"$(step_progress "$step")"
-  total="${total:-0}"; finished="${finished:-0}"   # stay numeric even if interrupted
-  if [ "$total" -gt 0 ] && [ "$finished" -ge "$total" ]; then head_glyph="✓"; head_color="$GREEN"
-  elif [ "$step" -le "$ACTIVE_STEP" ]; then head_glyph="▸"; head_color="$ACCENT"
-  else head_glyph="○"; head_color="$RULE"; fi
-  printf '  %s%s%s %s %s  %s%s%s   %s%d/%d%s%s\n' \
-    "$head_color" "$head_glyph" "$RESET" "$badge" "$icon" "$ACCENT$BOLD" "$name" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
-  for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && { render_task "$i"; printf '\n'; }; done
+  total="${total:-0}"; finished="${finished:-0}"
+  if [ "$total" -gt 0 ] && [ "$finished" -ge "$total" ]; then glyph="✓"; color="$GREEN"
+  elif [ "$step" -le "$ACTIVE_STEP" ]; then glyph="▸"; color="$ACCENT"
+  else glyph="○"; color="$RULE"; fi
+  printf '  %s%s%s %s %s  %s%s%s   %s%d/%d%s%s%s\n' \
+    "$color" "$glyph" "$RESET" "${STEP_BADGES[$step]}" "${STEP_ICONS[$step]}" \
+    "$ACCENT$BOLD" "${STEP_NAMES[$step]}" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$extra" "$CLEAR_EOL"
 }
 
-# The whole frame as text (no cursor moves) — banner, every step, footer.
-render_body() {
-  local finished=0 total="${#TASK_LABEL[@]}" pct=0 i step
+# Banner + footer wrapper around a step renderer ($1).
+_framed() {
+  local render_steps="$1" finished=0 total="${#TASK_LABEL[@]}" pct=0 i
   for i in "${!TASK_STATUS[@]}"; do case "${TASK_STATUS[$i]}" in ok|skip|upd|fail) finished=$((finished + 1)) ;; esac; done
   [ "$total" -gt 0 ] && pct=$(( finished * 100 / total ))
   printf '  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s%s\n%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET" "$CLEAR_EOL" "$CLEAR_EOL"
-  for step in $(seq 0 $((STEP_COUNT - 1))); do render_step "$step"; done
+  "$render_steps"
   printf '%s\n  %s%d%%%s  %s%d/%d tasks%s%s\n' \
     "$CLEAR_EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
 }
 
-# Redraw the whole frame in place: home, body, clear anything left below. No line
-# math — this is only ever used when the frame fits the terminal (see fits_live_view).
-render() { printf '\033[H'; render_body; printf '\033[J'; }
+# Full: every step expanded (header + all its task rows). For tall terminals.
+_steps_full() {
+  local step i
+  for step in $(seq 0 $((STEP_COUNT - 1))); do
+    _step_header "$step" ""
+    for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && render_task "$i"; done
+  done
+}
+render_body() { _framed _steps_full; }
+
+# Compact: one line per step; the active step shows its current item inline. Fixed
+# ~13 lines, so it fits any terminal without windowing/line math.
+_steps_compact() {
+  local step extra
+  for step in $(seq 0 $((STEP_COUNT - 1))); do
+    extra=""
+    [ "$step" = "$ACTIVE_STEP" ] && extra="$(printf '   %s· %s %s%s' "$MUTED" "${TASK_LABEL[$RUNNING_INDEX]}" "$ACTIVE_DETAIL" "$RESET")"
+    _step_header "$step" "$extra"
+  done
+}
+render_compact() { _framed _steps_compact; }
+
+# True when the full expanded frame fits the terminal (reliable ioctl size).
+frame_fits() {
+  local rows; rows="$(stty size 2>/dev/null | awk '{print $1}')"
+  case "$rows" in ''|*[!0-9]*) rows="$(tput lines 2>/dev/null)" ;; esac
+  case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
+  [ "$rows" -ge "$(( ${#TASK_LABEL[@]} + STEP_COUNT + 5 ))" ]
+}
+
+# The body sized to the terminal: full when it fits, compact otherwise.
+render_fit() { if frame_fits; then render_body; else render_compact; fi; }
+
+# One in-place redraw on the alternate screen: home, body that fits, clear below.
+render() { printf '\033[H'; render_fit; printf '\033[J'; }
 
 new_log_file() { mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM"; }
 
@@ -526,36 +558,20 @@ drive_task() {
   complete_task "$index" "$code" "$log" "$started"
 }
 
-# Interactive, terminal tall enough: the full-screen dashboard, redrawn in place.
+# Interactive view. Runs on the ALTERNATE screen buffer: the user can't scroll it
+# out of alignment and the scrollback stays clean. Full dashboard when it fits,
+# compact (one line per step) otherwise. On exit we restore the real screen and
+# print the finished result there, so it persists and the cursor is free.
 run_live_view() {
-  printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
+  printf '\033[?1049h\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
   local index
   for index in "${!TASK_LABEL[@]}"; do
-    ACTIVE_STEP="${TASK_STEP[$index]}"
+    ACTIVE_STEP="${TASK_STEP[$index]}"; RUNNING_INDEX="$index"
     drive_task "$index" render
     render
   done
-  ACTIVE_STEP=99   # 99 = past the last step, so every header reads ✓
-  printf '\033[2J\033[H'; render_body   # dump the whole finished view so it all persists
-  printf '\033[?25h'; TUI_ACTIVE=0
-}
-
-# Interactive, shorter terminal: a streaming log — each task animates in place on
-# one line (spinner + action), then commits to its final colored row and scrolls up.
-_stream_frame() { printf '\r'; render_task "$1"; }
-run_stream() {
-  printf '\033[?25l'; TUI_ACTIVE=1
-  local index current_step=-1
-  for index in "${!TASK_LABEL[@]}"; do
-    if [ "${TASK_STEP[$index]}" != "$current_step" ]; then
-      current_step="${TASK_STEP[$index]}"
-      printf '\n  %s%s%s %s  %s%s%s\n' \
-        "$ACCENT" "${STEP_BADGES[$current_step]}" "$RESET" "${STEP_ICONS[$current_step]}" "$ACCENT$BOLD" "${STEP_NAMES[$current_step]}" "$RESET"
-    fi
-    drive_task "$index" _stream_frame
-    printf '\r'; render_task "$index"; printf '\n'   # commit the final row
-  done
-  printf '\033[?25h'; TUI_ACTIVE=0
+  printf '\033[?25h\033[?1049l'; TUI_ACTIVE=0   # cursor back, leave the alt screen
+  ACTIVE_STEP=99; render_fit                     # finished result on the real screen
 }
 
 # Non-interactive (logs / CI): plain sequential lines, no cursor tricks.
@@ -590,24 +606,12 @@ print_summary() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-# Use the in-place dashboard only when the whole frame fits the terminal (banner +
-# step headers + every task + footer). Otherwise the plain stream, which scrolls
-# cleanly at any size. Just a height check — no per-line math.
-fits_live_view() {
-  local rows; rows="$(stty size 2>/dev/null | awk '{print $1}')"   # ioctl size; reliable
-  case "$rows" in ''|*[!0-9]*) rows="$(tput lines 2>/dev/null)" ;; esac
-  case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
-  [ "$rows" -ge "$(( ${#TASK_LABEL[@]} + STEP_COUNT + 5 ))" ]
-}
-
 main() {
   preflight
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
   acquire_sudo
   build_task_list
-  if [ ! -t 1 ]; then run_plain_output            # logs / CI
-  elif fits_live_view; then run_live_view          # tall terminal: full dashboard
-  else run_stream; fi                              # shorter terminal: animated stream
+  if [ -t 1 ]; then run_live_view; else run_plain_output; fi   # live view (alt screen) vs logs
   print_summary
 }
 
