@@ -364,7 +364,7 @@ build_task_list() {
   # 5 · macOS Settings
   add_task 5 "Theme Mode" fn enable_dark_mode
   add_task 5 "App Icons" fn enable_dark_app_icons
-  add_task 5 "Dock" fn configure_dock
+  add_task 5 "Dock Settings" fn configure_dock
   add_task 5 "Dock Apps" fn arrange_dock_apps
   add_task 5 "Shortcuts" fn set_next_window_shortcut
   add_task 5 "Firewall" fn enable_firewall
