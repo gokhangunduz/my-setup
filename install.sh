@@ -94,15 +94,17 @@ GIT_EMAIL="me@gokhangunduz.dev"
 # Internals — you usually don't need to touch anything below here.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Result tallies, shown in the end card.
 INSTALLED=0; UPDATED=0; SKIPPED=0; FAILED=0
-ERR_LOG="$(mktemp -t mysetup-errors 2>/dev/null || echo /tmp/mysetup-errors.$$)"
-SU_CACHE="$(mktemp -t mysetup-swupdate 2>/dev/null || echo /tmp/mysetup-swupdate.$$)"
-SUDO_KEEPALIVE_PID=""; SUDO_PRIMED=0
+
+ERROR_LOG="$(mktemp -t mysetup-errors 2>/dev/null || echo /tmp/mysetup-errors.$$)"
+SWUPDATE_CACHE="$(mktemp -t mysetup-swupdate 2>/dev/null || echo /tmp/mysetup-swupdate.$$)"
+SUDO_KEEPALIVE_PID=""; SUDO_AUTHENTICATED=0
 SUDOERS_FILE="/etc/sudoers.d/my-setup"; SUDOERS_INSTALLED=0
-STEP_TIMEOUT=1800   # seconds: kill any task that hangs longer, then continue
+TASK_TIMEOUT=1800   # seconds: kill any task that hangs longer, then carry on
 TUI_ACTIVE=0
 SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
-CIRCLED=(① ② ③ ④ ⑤ ⑥ ⑦ ⑧ ⑨ ⑩)
+STEP_BADGES=(① ② ③ ④ ⑤ ⑥ ⑦ ⑧ ⑨ ⑩)
 
 # 256-color palette, disabled when output isn't a terminal.
 if [ -t 1 ]; then
@@ -117,17 +119,21 @@ cleanup() {
   [ "$TUI_ACTIVE" = "1" ] && printf '\033[?25h'
   [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
   [ "$SUDOERS_INSTALLED" = "1" ] && sudo rm -f "$SUDOERS_FILE" 2>/dev/null
-  [ "$SUDO_PRIMED" = "1" ] && sudo -k 2>/dev/null
-  rm -f "$ERR_LOG" "$SU_CACHE" 2>/dev/null
+  [ "$SUDO_AUTHENTICATED" = "1" ] && sudo -k 2>/dev/null
+  rm -f "$ERROR_LOG" "$SWUPDATE_CACHE" 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
-fmt_secs() { local s=$1; if [ "$s" -lt 60 ]; then printf '%ds' "$s"; else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi; }
+format_duration() {
+  local seconds=$1
+  if [ "$seconds" -lt 60 ]; then printf '%ds' "$seconds"
+  else printf '%dm%02ds' $((seconds / 60)) $((seconds % 60)); fi
+}
 
-# ── Commands the tasks run ───────────────────────────────────────────────────
+# ── Task commands ────────────────────────────────────────────────────────────
 # Each returns 10 when already in the desired state (shown as ⊘ skipped).
 
-_git_config() {
+configure_git() {
   [ "$(git config --global user.name 2>/dev/null)" = "$GIT_NAME" ] \
     && [ "$(git config --global user.email 2>/dev/null)" = "$GIT_EMAIL" ] \
     && [ "$(git config --global pull.rebase 2>/dev/null)" = "false" ] && return 10
@@ -138,18 +144,18 @@ _git_config() {
   git config --global pull.rebase false
 }
 
-_configure_zsh_plugins() {
-  local f="$HOME/.zsh_plugins.txt" tmp; tmp="$(mktemp)"
+write_zsh_plugins() {
+  local file="$HOME/.zsh_plugins.txt" tmp; tmp="$(mktemp)"
   printf '%s\n' "${ZSH_PLUGINS[@]}" >"$tmp"
-  if [ -f "$f" ] && cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 10; fi
-  mv "$tmp" "$f"
+  if [ -f "$file" ] && cmp -s "$tmp" "$file"; then rm -f "$tmp"; return 10; fi
+  mv "$tmp" "$file"
 }
 
 # Fenced block in ~/.zshrc so we never clobber the user's lines. Markers must stay
 # free of regex-special characters (they're used as awk patterns below).
-_ZRC_BEGIN="# my-setup antidote begin"
-_ZRC_END="# my-setup antidote end"
-_zshrc_block() {
+ZSHRC_MARK_BEGIN="# my-setup antidote begin"
+ZSHRC_MARK_END="# my-setup antidote end"
+zshrc_block() {
   cat <<'BLK'
 # my-setup antidote begin
 # Powerlevel10k instant prompt — keep this near the top.
@@ -157,10 +163,10 @@ if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 fi
 # antidote — clones and loads every plugin listed in ~/.zsh_plugins.txt
-for _ad in "${HOMEBREW_PREFIX:-/opt/homebrew}" /opt/homebrew /usr/local; do
-  [[ -r "$_ad/share/antidote/antidote.zsh" ]] && { source "$_ad/share/antidote/antidote.zsh"; break; }
+for _brew_prefix in "${HOMEBREW_PREFIX:-/opt/homebrew}" /opt/homebrew /usr/local; do
+  [[ -r "$_brew_prefix/share/antidote/antidote.zsh" ]] && { source "$_brew_prefix/share/antidote/antidote.zsh"; break; }
 done
-unset _ad
+unset _brew_prefix
 antidote load
 autoload -Uz compinit && compinit -u
 [[ -f "$HOME/.p10k.zsh" ]] && source "$HOME/.p10k.zsh"
@@ -168,27 +174,27 @@ autoload -Uz compinit && compinit -u
 BLK
 }
 
-_configure_zshrc() {
-  local rc="$HOME/.zshrc"; [ -f "$rc" ] || touch "$rc"
-  local wantf curf tmp; wantf="$(mktemp)"; curf="$(mktemp)"
-  _zshrc_block >"$wantf"
-  awk -v b="$_ZRC_BEGIN" -v e="$_ZRC_END" '$0 ~ b {f=1} f {print} $0 ~ e {f=0}' "$rc" >"$curf"
-  if cmp -s "$wantf" "$curf"; then rm -f "$wantf" "$curf"; return 10; fi
+write_zshrc() {
+  local file="$HOME/.zshrc"; [ -f "$file" ] || touch "$file"
+  local want current tmp; want="$(mktemp)"; current="$(mktemp)"
+  zshrc_block >"$want"
+  awk -v b="$ZSHRC_MARK_BEGIN" -v e="$ZSHRC_MARK_END" '$0 ~ b {f=1} f {print} $0 ~ e {f=0}' "$file" >"$current"
+  if cmp -s "$want" "$current"; then rm -f "$want" "$current"; return 10; fi
   tmp="$(mktemp)"
-  awk -v b="$_ZRC_BEGIN" -v e="$_ZRC_END" '$0 ~ b {skip=1} skip!=1 {print} $0 ~ e {skip=0}' "$rc" >"$tmp"
-  printf '\n' >>"$tmp"; cat "$wantf" >>"$tmp"
-  mv "$tmp" "$rc"; rm -f "$wantf" "$curf"
+  awk -v b="$ZSHRC_MARK_BEGIN" -v e="$ZSHRC_MARK_END" '$0 ~ b {skip=1} skip!=1 {print} $0 ~ e {skip=0}' "$file" >"$tmp"
+  printf '\n' >>"$tmp"; cat "$want" >>"$tmp"
+  mv "$tmp" "$file"; rm -f "$want" "$current"
 }
 
-_appearance_prefs() {
+enable_dark_mode() {
   [ "$(defaults read -g AppleInterfaceStyle 2>/dev/null)" = "Dark" ] && return 10
   defaults write -g AppleInterfaceStyle -string Dark
 }
-_appicons_prefs() {
+enable_dark_app_icons() {
   [ "$(defaults read -g AppleIconAppearanceTheme 2>/dev/null)" = "RegularDark" ] && return 10
   defaults write -g AppleIconAppearanceTheme -string RegularDark
 }
-_dock_prefs() {
+configure_dock() {
   [ "$(defaults read com.apple.dock tilesize 2>/dev/null)" = "64" ] \
     && [ "$(defaults read com.apple.dock magnification 2>/dev/null)" = "1" ] \
     && [ "$(defaults read com.apple.dock largesize 2>/dev/null)" = "92" ] && return 10
@@ -199,26 +205,26 @@ _dock_prefs() {
 }
 # Cmd+" → "Move focus to next window" (hotkey 27). params = (34=", 10=key code on
 # this layout, 1048576=Cmd), captured from System Settings; re-capture if it differs.
-_keyboard_shortcut() {
-  local p="$HOME/Library/Preferences/com.apple.symbolichotkeys.plist"
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:0' "$p" 2>/dev/null)" = "34" ] \
-    && [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:1' "$p" 2>/dev/null)" = "10" ] \
-    && [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:2' "$p" 2>/dev/null)" = "1048576" ] && return 10
+set_next_window_shortcut() {
+  local plist="$HOME/Library/Preferences/com.apple.symbolichotkeys.plist"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:0' "$plist" 2>/dev/null)" = "34" ] \
+    && [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:1' "$plist" 2>/dev/null)" = "10" ] \
+    && [ "$(/usr/libexec/PlistBuddy -c 'Print :AppleSymbolicHotKeys:27:value:parameters:2' "$plist" 2>/dev/null)" = "1048576" ] && return 10
   defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 \
     '{enabled=1;value={parameters=(34,10,1048576);type=standard;};}' || return 1
   /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u 2>/dev/null || true
 }
-_firewall_on() {
+enable_firewall() {
   /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -q 'State = 1' && return 10
   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
 }
-_battery_prefs() {
-  local cust bat ac
-  cust="$(pmset -g custom 2>/dev/null)"
-  bat="$(printf '%s' "$cust" | sed -n '/Battery/,/AC Power/p')"   # battery section
-  ac="$(printf '%s' "$cust" | sed -n '/AC Power/,$p')"            # power-adapter section
-  printf '%s' "$bat" | grep -qE 'lessbright[[:space:]]+1' \
-    && printf '%s' "$bat" | grep -qE 'womp[[:space:]]+0' \
+configure_power() {
+  local settings battery ac
+  settings="$(pmset -g custom 2>/dev/null)"
+  battery="$(printf '%s' "$settings" | sed -n '/Battery/,/AC Power/p')"
+  ac="$(printf '%s' "$settings" | sed -n '/AC Power/,$p')"
+  printf '%s' "$battery" | grep -qE 'lessbright[[:space:]]+1' \
+    && printf '%s' "$battery" | grep -qE 'womp[[:space:]]+0' \
     && printf '%s' "$ac" | grep -qE '[^a-z]sleep[[:space:]]+0' \
     && printf '%s' "$ac" | grep -qE 'womp[[:space:]]+1' && return 10
   sudo pmset -b lessbright 1 &&   # dim on battery
@@ -226,7 +232,7 @@ _battery_prefs() {
   sudo pmset -c womp 1 &&         # wake for network on AC
   sudo pmset -b womp 0            # ...but not on battery
 }
-_hostname_set() {
+set_local_hostname() {
   [ "$(scutil --get LocalHostName 2>/dev/null)" = "gg" ] && return 10
   sudo scutil --set LocalHostName gg
 }
@@ -239,10 +245,10 @@ preflight() {
 }
 
 # One password prompt, then a temporary passwordless-sudo rule (revoked on exit).
-prime_sudo() {
+acquire_sudo() {
   printf '  %s🔑  Enter your macOS password once — then it runs unattended.%s\n' "$MUTED" "$RESET"
   if ! sudo -v; then printf '  %s✗ Administrator access is required (your account must be an admin).%s\n' "$RED" "$RESET"; exit 1; fi
-  SUDO_PRIMED=1
+  SUDO_AUTHENTICATED=1
   if printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$(id -un)" | sudo tee "$SUDOERS_FILE" >/dev/null 2>&1 \
      && sudo chmod 440 "$SUDOERS_FILE" 2>/dev/null && sudo visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then
     SUDOERS_INSTALLED=1
@@ -254,17 +260,17 @@ prime_sudo() {
 }
 
 # Homebrew: install if missing, else update; return 10 if already up to date.
-_brew_ensure() {
+ensure_homebrew() {
   if command -v brew >/dev/null 2>&1; then
-    local out; out="$(brew update 2>&1)"
-    printf '%s' "$out" | grep -qi 'already up-to-date' && return 10
+    local output; output="$(brew update 2>&1)"
+    printf '%s' "$output" | grep -qi 'already up-to-date' && return 10
     return 0
   fi
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
   [ -x "$BREW_PREFIX/bin/brew" ] || command -v brew >/dev/null 2>&1
 }
 # Put brew on PATH for the rest of the run + future shells. Runs in the PARENT.
-_brew_shellenv() {
+add_brew_to_path() {
   BREW_PREFIX="$(brew --prefix 2>/dev/null || echo "$BREW_PREFIX")"
   eval "$("$BREW_PREFIX/bin/brew" shellenv 2>/dev/null)"
   grep -qsF '/brew shellenv' "$HOME/.zprofile" 2>/dev/null \
@@ -274,200 +280,212 @@ _brew_shellenv() {
 # ── Task model ───────────────────────────────────────────────────────────────
 # Eight steps; tasks are flat parallel arrays so the renderer can group/count them.
 
-STEP_ICON=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄)
-STEP_NAME=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates")
-NSTEPS=${#STEP_NAME[@]}
+STEP_ICONS=(🍺 🐙 🧰 📦 🐚 🎨 🛒 🔄)
+STEP_NAMES=("Homebrew" "Git" "Formulae" "Casks" "Shell" "macOS Settings" "Mac App Store" "macOS Updates")
+STEP_COUNT=${#STEP_NAMES[@]}
 
-T_STEP=(); T_LABEL=(); T_KIND=(); T_ARG=(); T_STAT=(); T_TIME=()
-add_task() { T_STEP+=("$1"); T_LABEL+=("$2"); T_KIND+=("$3"); T_ARG+=("$4"); T_STAT+=("pending"); T_TIME+=(""); }
+# Parallel arrays, one slot per task. status ∈ pending|run|ok|upd|skip|fail.
+TASK_STEP=(); TASK_LABEL=(); TASK_KIND=(); TASK_ARG=(); TASK_STATUS=(); TASK_TIME=()
+add_task() {
+  TASK_STEP+=("$1"); TASK_LABEL+=("$2"); TASK_KIND+=("$3"); TASK_ARG+=("$4")
+  TASK_STATUS+=("pending"); TASK_TIME+=("")
+}
 
-build_tasks() {
-  local x id nm
+build_task_list() {
+  local item id name
   # 0 · Homebrew
   add_task 0 "package manager" homebrew ""
   # 1 · Git (install + config, separate tasks)
   add_task 1 "git" formula "git"
-  add_task 1 "git config" fn _git_config
+  add_task 1 "git config" fn configure_git
   # 2 · Formulae (taps first)
-  for x in "${TAPS[@]}"; do add_task 2 "tap ${x}" tap "$x"; done
-  for x in "${FORMULAE[@]}"; do add_task 2 "$x" formula "$x"; done
+  for item in "${TAPS[@]}"; do add_task 2 "tap ${item}" tap "$item"; done
+  for item in "${FORMULAE[@]}"; do add_task 2 "$item" formula "$item"; done
   # 3 · Casks
-  for x in "${CASKS[@]}"; do add_task 3 "$x" cask "$x"; done
+  for item in "${CASKS[@]}"; do add_task 3 "$item" cask "$item"; done
   # 4 · Shell (antidote plugin list + .zshrc)
-  add_task 4 ".zsh_plugins.txt" fn _configure_zsh_plugins
-  add_task 4 ".zshrc" fn _configure_zshrc
+  add_task 4 ".zsh_plugins.txt" fn write_zsh_plugins
+  add_task 4 ".zshrc" fn write_zshrc
   # 5 · macOS Settings
-  add_task 5 "Theme Mode" fn _appearance_prefs
-  add_task 5 "App Icons" fn _appicons_prefs
-  add_task 5 "Dock" fn _dock_prefs
-  add_task 5 "Shortcuts" fn _keyboard_shortcut
-  add_task 5 "Firewall" fn _firewall_on
-  add_task 5 "Battery" fn _battery_prefs
-  add_task 5 "Hostname" fn _hostname_set
+  add_task 5 "Theme Mode" fn enable_dark_mode
+  add_task 5 "App Icons" fn enable_dark_app_icons
+  add_task 5 "Dock" fn configure_dock
+  add_task 5 "Shortcuts" fn set_next_window_shortcut
+  add_task 5 "Firewall" fn enable_firewall
+  add_task 5 "Battery" fn configure_power
+  add_task 5 "Hostname" fn set_local_hostname
   # 6 · Mac App Store
-  for x in "${MAS_APPS[@]}"; do id="${x%%|*}"; nm="${x##*|}"; add_task 6 "$nm" mas "$id"; done
+  for item in "${MAS_APPS[@]}"; do id="${item%%|*}"; name="${item##*|}"; add_task 6 "$name" mas "$id"; done
   # 7 · macOS Updates (CLT + macOS, checked separately)
   add_task 7 "Command Line Tools" clt ""
   add_task 7 "macOS" macos ""
 }
 
-# Install $2 (--formula/--cask) if missing, upgrade if outdated, else leave it.
-# exit 0 installed · 11 upgraded · 10 current.
-_brew_pkg() {
-  brew list "$1" --versions "$2" >/dev/null 2>&1 || { brew install "$1" "$2" || exit 1; exit 0; }
-  [ -n "$(brew outdated "$1" "$2" 2>/dev/null)" ] && { brew upgrade "$1" "$2" || exit 1; exit 11; }
+# Install $name if missing, upgrade if outdated, else leave it. $flag is the
+# Homebrew type (--formula/--cask). exit 0 installed · 11 upgraded · 10 current.
+ensure_brew_package() {
+  local flag="$1" name="$2"
+  brew list "$flag" --versions "$name" >/dev/null 2>&1 || { brew install "$flag" "$name" || exit 1; exit 0; }
+  [ -n "$(brew outdated "$flag" "$name" 2>/dev/null)" ] && { brew upgrade "$flag" "$name" || exit 1; exit 11; }
   exit 10
 }
 
 # Run one task (in a subshell). Exit code: 0 done · 10 skipped · 11 updated · else failed.
 run_task() {
-  local kind="${T_KIND[$1]}" arg="${T_ARG[$1]}"
+  local kind="${TASK_KIND[$1]}" arg="${TASK_ARG[$1]}"
   case "$kind" in
-    homebrew) _brew_ensure; exit $? ;;
+    homebrew) ensure_homebrew; exit $? ;;
     fn)      "$arg"; exit $? ;;
     tap)     if brew tap 2>/dev/null | grep -qxF "$arg"; then brew trust --tap "$arg" >/dev/null 2>&1; exit 10; fi
              brew tap "$arg" || exit 1; brew trust --tap "$arg" >/dev/null 2>&1; exit 0 ;;
-    formula) _brew_pkg --formula "$arg" ;;
-    cask)    _brew_pkg --cask "$arg" ;;
+    formula) ensure_brew_package --formula "$arg" ;;
+    cask)    ensure_brew_package --cask "$arg" ;;
     mas)     mas list 2>/dev/null | grep -q "^$arg " && exit 10; mas install "$arg"; exit $? ;;
-    clt)     softwareupdate -l >"$SU_CACHE" 2>&1   # one query to Apple, cached for the macOS task
-             local lbl; lbl="$(grep 'Label:' "$SU_CACHE" 2>/dev/null | grep -i 'Command Line Tools' | sed -E 's/.*Label: *//; s/ *$//' | head -1)"
-             [ -z "$lbl" ] && exit 10
-             nohup sudo softwareupdate --download "$lbl" >/dev/null 2>&1 & exit 0 ;;
-    macos)   local labels=() lbl
-             while IFS= read -r lbl; do
-               lbl="$(printf '%s' "$lbl" | sed -E 's/.*Label: *//; s/ *$//')"
-               [ -n "$lbl" ] && labels+=("$lbl")
-             done < <(grep 'Label:' "$SU_CACHE" 2>/dev/null | grep -vi 'Command Line Tools')
+    clt)     softwareupdate -l >"$SWUPDATE_CACHE" 2>&1   # one query to Apple, cached for the macOS task
+             local label; label="$(grep 'Label:' "$SWUPDATE_CACHE" 2>/dev/null | grep -i 'Command Line Tools' | sed -E 's/.*Label: *//; s/ *$//' | head -1)"
+             [ -z "$label" ] && exit 10
+             nohup sudo softwareupdate --download "$label" >/dev/null 2>&1 & exit 0 ;;
+    macos)   local labels=() label
+             while IFS= read -r label; do
+               label="$(printf '%s' "$label" | sed -E 's/.*Label: *//; s/ *$//')"
+               [ -n "$label" ] && labels+=("$label")
+             done < <(grep 'Label:' "$SWUPDATE_CACHE" 2>/dev/null | grep -vi 'Command Line Tools')
              [ "${#labels[@]}" -eq 0 ] && exit 10
              nohup sudo softwareupdate --download "${labels[@]}" >/dev/null 2>&1 & exit 0 ;;
   esac
   exit 0
 }
 
-finish_task() {
-  local i="$1" rc="$2" logf="$3" kind="${T_KIND[$1]}" label="${T_LABEL[$1]}"
-  case "$rc" in
-    0)  T_STAT[$i]="ok";   INSTALLED=$((INSTALLED + 1)) ;;
-    11) T_STAT[$i]="upd";  UPDATED=$((UPDATED + 1)) ;;
-    10) T_STAT[$i]="skip"; SKIPPED=$((SKIPPED + 1)) ;;
-    *)  T_STAT[$i]="fail"; FAILED=$((FAILED + 1)); { printf '\n=== %s ===\n' "$label"; cat "$logf"; } >>"$ERR_LOG" ;;
+# Map a finished task's exit code to its status and bump the matching tally.
+record_result() {
+  local index="$1" code="$2" log="$3" kind="${TASK_KIND[$1]}" label="${TASK_LABEL[$1]}"
+  case "$code" in
+    0)  TASK_STATUS[$index]="ok";   INSTALLED=$((INSTALLED + 1)) ;;
+    11) TASK_STATUS[$index]="upd";  UPDATED=$((UPDATED + 1)) ;;
+    10) TASK_STATUS[$index]="skip"; SKIPPED=$((SKIPPED + 1)) ;;
+    *)  TASK_STATUS[$index]="fail"; FAILED=$((FAILED + 1)); { printf '\n=== %s ===\n' "$label"; cat "$log"; } >>"$ERROR_LOG" ;;
   esac
-  case "$kind" in clt|macos) [ "$rc" = 0 ] && T_TIME[$i]="started" ;; esac
+  case "$kind" in clt|macos) [ "$code" = 0 ] && TASK_TIME[$index]="started" ;; esac
 }
 
 # ── Live full-screen view ────────────────────────────────────────────────────
 
-ACTIVE_STEP=0; TFRAME=0; TASK_W=30
-EOL=$'\033[K'   # clear to EOL so a shrinking line leaves no stale tail
+ACTIVE_STEP=0; SPIN_FRAME=0; LABEL_WIDTH=30
+CLEAR_EOL=$'\033[K'   # clear to end of line so a shrinking line leaves no stale tail
 
-_step_counts() {
-  local s="$1" total=0 done=0 i
-  for i in "${!T_STEP[@]}"; do
-    [ "${T_STEP[$i]}" = "$s" ] || continue
+# Echo "<total> <finished>" for the tasks belonging to step $1.
+step_progress() {
+  local step="$1" total=0 finished=0 i
+  for i in "${!TASK_STEP[@]}"; do
+    [ "${TASK_STEP[$i]}" = "$step" ] || continue
     total=$((total + 1))
-    case "${T_STAT[$i]}" in ok|skip|upd|fail) done=$((done + 1)) ;; esac
+    case "${TASK_STATUS[$i]}" in ok|skip|upd|fail) finished=$((finished + 1)) ;; esac
   done
-  printf '%d %d' "$total" "$done"
+  printf '%d %d' "$total" "$finished"
 }
 
 render_task() {
-  local i="$1" st="${T_STAT[$1]}" label="${T_LABEL[$1]}" tm="${T_TIME[$1]}" g gc sec sc="$MUTED"
-  case "$st" in
-    pending) g="○"; gc="$RULE";   sec="" ;;
-    run)     g="${SPINNER[TFRAME % ${#SPINNER[@]}]}"; gc="$ACCENT"; sec="" ;;
-    ok)      g="✓"; gc="$GREEN";  sec="$tm" ;;
-    upd)     g="↑"; gc="$CYAN";   sec="${tm:-updated}" ;;
-    skip)    g="⊘"; gc="$MUTED";  sec="skipped" ;;
-    fail)    g="✗"; gc="$RED";    sec="failed"; sc="$RED" ;;
+  local index="$1" status="${TASK_STATUS[$1]}" label="${TASK_LABEL[$1]}" elapsed="${TASK_TIME[$1]}"
+  local glyph glyph_color detail detail_color="$MUTED"
+  case "$status" in
+    pending) glyph="○"; glyph_color="$RULE";   detail="" ;;
+    run)     glyph="${SPINNER[SPIN_FRAME % ${#SPINNER[@]}]}"; glyph_color="$ACCENT"; detail="" ;;
+    ok)      glyph="✓"; glyph_color="$GREEN";  detail="$elapsed" ;;
+    upd)     glyph="↑"; glyph_color="$CYAN";   detail="${elapsed:-updated}" ;;
+    skip)    glyph="⊘"; glyph_color="$MUTED";  detail="skipped" ;;
+    fail)    glyph="✗"; glyph_color="$RED";    detail="failed"; detail_color="$RED" ;;
   esac
-  printf '      %s%s%s  %-*s %s%s%s%s\n' "$gc" "$g" "$RESET" "$TASK_W" "$label" "$sc" "$sec" "$RESET" "$EOL"
+  printf '      %s%s%s  %-*s %s%s%s%s\n' \
+    "$glyph_color" "$glyph" "$RESET" "$LABEL_WIDTH" "$label" "$detail_color" "$detail" "$RESET" "$CLEAR_EOL"
 }
 
 # Every step stays expanded: header (✓ done / ▸ active / ○ upcoming) + all its rows.
 render_step() {
-  local s="$1" badge="${CIRCLED[$s]}" icon="${STEP_ICON[$s]}" name="${STEP_NAME[$s]}"
-  local cnt total done i hg hc; cnt="$(_step_counts "$s")"; total="${cnt% *}"; done="${cnt#* }"
-  if [ "$total" -gt 0 ] && [ "$done" -ge "$total" ]; then hg="✓"; hc="$GREEN"
-  elif [ "$s" -le "$ACTIVE_STEP" ]; then hg="▸"; hc="$ACCENT"
-  else hg="○"; hc="$RULE"; fi
+  local step="$1" badge="${STEP_BADGES[$1]}" icon="${STEP_ICONS[$1]}" name="${STEP_NAMES[$1]}"
+  local total finished i head_glyph head_color
+  read -r total finished <<<"$(step_progress "$step")"
+  if [ "$total" -gt 0 ] && [ "$finished" -ge "$total" ]; then head_glyph="✓"; head_color="$GREEN"
+  elif [ "$step" -le "$ACTIVE_STEP" ]; then head_glyph="▸"; head_color="$ACCENT"
+  else head_glyph="○"; head_color="$RULE"; fi
   printf '  %s%s%s %s %s  %s%s%s   %s%d/%d%s%s\n' \
-    "$hc" "$hg" "$RESET" "$badge" "$icon" "$ACCENT$BOLD" "$name" "$RESET" "$MUTED" "$done" "$total" "$RESET" "$EOL"
-  for i in "${!T_STEP[@]}"; do [ "${T_STEP[$i]}" = "$s" ] && render_task "$i"; done
+    "$head_color" "$head_glyph" "$RESET" "$badge" "$icon" "$ACCENT$BOLD" "$name" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
+  for i in "${!TASK_STEP[@]}"; do [ "${TASK_STEP[$i]}" = "$step" ] && render_task "$i"; done
 }
 
 render() {
-  local td=0 tt="${#T_LABEL[@]}" pct=0 i s
-  for i in "${!T_STAT[@]}"; do case "${T_STAT[$i]}" in ok|skip|upd|fail) td=$((td + 1)) ;; esac; done
-  [ "$tt" -gt 0 ] && pct=$(( td * 100 / tt ))
+  local finished=0 total="${#TASK_LABEL[@]}" pct=0 i step
+  for i in "${!TASK_STATUS[@]}"; do case "${TASK_STATUS[$i]}" in ok|skip|upd|fail) finished=$((finished + 1)) ;; esac; done
+  [ "$total" -gt 0 ] && pct=$(( finished * 100 / total ))
   printf '\033[H'
-  printf '  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s%s\n%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET" "$EOL" "$EOL"
-  for s in $(seq 0 $((NSTEPS - 1))); do render_step "$s"; done
+  printf '  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s%s\n%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET" "$CLEAR_EOL" "$CLEAR_EOL"
+  for step in $(seq 0 $((STEP_COUNT - 1))); do render_step "$step"; done
   printf '%s\n  %s%d%%%s  %s%d/%d tasks%s%s\n' \
-    "$EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$td" "$tt" "$RESET" "$EOL"
+    "$CLEAR_EOL" "$ACCENT$BOLD" "$pct" "$RESET" "$MUTED" "$finished" "$total" "$RESET" "$CLEAR_EOL"
   printf '\033[J'
 }
 
-_new_logf() { mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM"; }
+new_log_file() { mktemp -t mysetup 2>/dev/null || echo "/tmp/mysetup.$$.$RANDOM"; }
 
-# Post-task bookkeeping shared by engine + stream: put brew on PATH after the
+# Post-run bookkeeping shared by both renderers: put brew on PATH after the
 # Homebrew step (parent side), record elapsed time, tally the result, drop the log.
-_finish_one() {
-  local i="$1" rc="$2" logf="$3" t0="$4" dt
-  [ "${T_KIND[$i]}" = "homebrew" ] && [ "$rc" -ne 1 ] && _brew_shellenv
-  dt=$((SECONDS - t0)); [ "$dt" -ge 1 ] && T_TIME[$i]="$(fmt_secs "$dt")"
-  finish_task "$i" "$rc" "$logf"; rm -f "$logf"
+complete_task() {
+  local index="$1" code="$2" log="$3" started="$4" elapsed
+  [ "${TASK_KIND[$index]}" = "homebrew" ] && [ "$code" -ne 1 ] && add_brew_to_path
+  elapsed=$((SECONDS - started)); [ "$elapsed" -ge 1 ] && TASK_TIME[$index]="$(format_duration "$elapsed")"
+  record_result "$index" "$code" "$log"; rm -f "$log"
 }
 
-engine() {
+# Interactive: full-screen view, one task at a time with a spinner + timeout.
+run_live_view() {
   printf '\033[2J\033[H\033[?25l'; TUI_ACTIVE=1
-  local i pid rc t0 logf
-  for i in "${!T_LABEL[@]}"; do
-    ACTIVE_STEP="${T_STEP[$i]}"; T_STAT[$i]="run"
-    logf="$(_new_logf)"; t0=$SECONDS
-    ( run_task "$i" ) >"$logf" 2>&1 &
+  local index pid code started log
+  for index in "${!TASK_LABEL[@]}"; do
+    ACTIVE_STEP="${TASK_STEP[$index]}"; TASK_STATUS[$index]="run"
+    log="$(new_log_file)"; started=$SECONDS
+    ( run_task "$index" ) >"$log" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
-      if [ "$((SECONDS - t0))" -ge "$STEP_TIMEOUT" ]; then
-        printf '\n[my-setup] task exceeded %ss — terminated so the run can continue\n' "$STEP_TIMEOUT" >>"$logf"
+      if [ "$((SECONDS - started))" -ge "$TASK_TIMEOUT" ]; then
+        printf '\n[my-setup] task exceeded %ss — terminated so the run can continue\n' "$TASK_TIMEOUT" >>"$log"
         kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; break
       fi
-      render; TFRAME=$((TFRAME + 1)); sleep 0.1
+      render; SPIN_FRAME=$((SPIN_FRAME + 1)); sleep 0.1
     done
-    { wait "$pid"; } 2>/dev/null; rc=$?
-    _finish_one "$i" "$rc" "$logf" "$t0"; render
+    { wait "$pid"; } 2>/dev/null; code=$?
+    complete_task "$index" "$code" "$log" "$started"; render
   done
-  ACTIVE_STEP=99; render
+  ACTIVE_STEP=99; render   # 99 = past the last step, so every header reads ✓
   printf '\033[?25h'; TUI_ACTIVE=0
 }
 
-# Plain sequential output when there's no terminal (logs / CI).
-stream() {
-  local i rc t0 logf cur=-1
-  for i in "${!T_LABEL[@]}"; do
-    [ "${T_STEP[$i]}" != "$cur" ] && { cur="${T_STEP[$i]}"; printf '\n%s %s\n' "${CIRCLED[$cur]}" "${STEP_NAME[$cur]}"; }
-    logf="$(_new_logf)"; t0=$SECONDS
-    ( run_task "$i" ) >"$logf" 2>&1; rc=$?
-    _finish_one "$i" "$rc" "$logf" "$t0"
-    case "${T_STAT[$i]}" in
-      ok)   printf '  + %s %s\n' "${T_LABEL[$i]}" "${T_TIME[$i]}" ;;
-      upd)  printf '  ^ %s (updated)\n' "${T_LABEL[$i]}" ;;
-      skip) printf '  . %s (skipped)\n' "${T_LABEL[$i]}" ;;
-      fail) printf '  x %s (failed)\n' "${T_LABEL[$i]}" ;;
+# Non-interactive: plain sequential output (logs / CI).
+run_plain_output() {
+  local index code started log current_step=-1
+  for index in "${!TASK_LABEL[@]}"; do
+    [ "${TASK_STEP[$index]}" != "$current_step" ] \
+      && { current_step="${TASK_STEP[$index]}"; printf '\n%s %s\n' "${STEP_BADGES[$current_step]}" "${STEP_NAMES[$current_step]}"; }
+    log="$(new_log_file)"; started=$SECONDS
+    ( run_task "$index" ) >"$log" 2>&1; code=$?
+    complete_task "$index" "$code" "$log" "$started"
+    case "${TASK_STATUS[$index]}" in
+      ok)   printf '  + %s %s\n' "${TASK_LABEL[$index]}" "${TASK_TIME[$index]}" ;;
+      upd)  printf '  ^ %s (updated)\n' "${TASK_LABEL[$index]}" ;;
+      skip) printf '  . %s (skipped)\n' "${TASK_LABEL[$index]}" ;;
+      fail) printf '  x %s (failed)\n' "${TASK_LABEL[$index]}" ;;
     esac
   done
 }
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
-summary() {
-  printf '\n  %s%s❖  my-setup%s  %s· done in %s%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$(fmt_secs "$SECONDS")" "$RESET"
+print_summary() {
+  printf '\n  %s%s❖  my-setup%s  %s· done in %s%s\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$(format_duration "$SECONDS")" "$RESET"
   printf '  %s%s✓ %d installed%s   %s↑ %d updated%s   %s⊘ %d skipped%s   %s✗ %d failed%s\n' \
     "$GREEN" "$BOLD" "$INSTALLED" "$RESET" "$CYAN" "$UPDATED" "$RESET" \
     "$MUTED" "$SKIPPED" "$RESET" "$RED" "$FAILED" "$RESET"
   if [ "$FAILED" -gt 0 ]; then
     printf '\n  %sFailures — re-run to retry (finished steps are skipped):%s\n' "$YELLOW" "$RESET"
-    sed 's/^/    /' "$ERR_LOG"
+    sed 's/^/    /' "$ERROR_LOG"
   fi
   printf '\n'
 }
@@ -477,10 +495,10 @@ summary() {
 main() {
   preflight
   printf '\n  %s%s❖  my-setup%s  %s· fresh macOS bootstrap%s\n\n' "$ACCENT" "$BOLD" "$RESET" "$MUTED" "$RESET"
-  prime_sudo
-  build_tasks
-  if [ -t 1 ]; then engine; else stream; fi
-  summary
+  acquire_sudo
+  build_task_list
+  if [ -t 1 ]; then run_live_view; else run_plain_output; fi
+  print_summary
 }
 
 main "$@"

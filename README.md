@@ -5,7 +5,7 @@ tools, apps, macOS settings, and my zsh setup install themselves behind a live,
 state-aware progress view.
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="my-setup running: every step expanded with live per-item state" width="420">
+  <img src="assets/screenshot.png" alt="my-setup running: every step expanded with live per-item state" width="100%">
 </p>
 
 ## Quick start
@@ -14,8 +14,9 @@ state-aware progress view.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/gokhangunduz/my-setup/main/install.sh)"
 ```
 
-One password prompt up front, then it's unattended. Each item shows its own state
-— `✓` installed · `↑` updated · `⊘` skipped · `✗` failed.
+One password prompt up front, then it's unattended. Each item shows its own state:
+
+`✓` installed · `↑` updated · `⊘` skipped · `✗` failed
 
 ## What it installs
 
