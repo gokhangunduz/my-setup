@@ -42,7 +42,7 @@ current), `✗` failed. The view stays put when it's done; the cursor is yours a
 | **Git** | git itself, then a global config (name/email, default branch, `pull.rebase false`) |
 | **Formulae** | node, python, postgresql, sqlite, MongoDB Community (via the `mongodb/brew` tap), gh, hcloud, awscli, mas |
 | **Casks** | Google Chrome, VS Code, WebStorm, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Google Gemini, Claude, Claude Code, Codex, Logitech Options+, BetterDisplay, TeamViewer, NVIDIA GeForce NOW |
-| **Shell** | Oh My Zsh, zsh-autosuggestions, zsh-syntax-highlighting, Powerlevel10k |
+| **Shell** | Oh My Zsh + Powerlevel10k; cloned plugins (zsh-autosuggestions, zsh-syntax-highlighting, zsh-completions) and built-in ones enabled in `plugins=()` (git, brew, macos, docker, gh, aws, npm, node, …) |
 | **macOS Settings** | Theme Mode (dark), App Icons, Dock, Shortcuts (`Cmd+"`), Firewall, Battery, Hostname |
 | **Mac App Store** | Xcode, WhatsApp, Apple Developer — installed from the App Store via `mas` |
 | **macOS Updates** | Command Line Tools and the macOS system, checked separately; available updates download in the background (no waiting, no restart) |

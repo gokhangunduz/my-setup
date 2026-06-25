@@ -79,10 +79,13 @@ MAS_APPS=(
   "640199958|Apple Developer"
 )
 
-# Oh My Zsh plugins / theme: "label|destination|repo-url"
+# Oh My Zsh plugins / theme to git-clone into custom/: "label|destination|repo-url".
+# Built-in OMZ plugins (git, brew, docker, …) need no clone — list them in
+# ZSH_PLUGINS_VALUE below instead.
 ZSH_PLUGINS=(
   "zsh-autosuggestions|plugins/zsh-autosuggestions|https://github.com/zsh-users/zsh-autosuggestions"
   "zsh-syntax-highlighting|plugins/zsh-syntax-highlighting|https://github.com/zsh-users/zsh-syntax-highlighting"
+  "zsh-completions|plugins/zsh-completions|https://github.com/zsh-users/zsh-completions"
   "powerlevel10k|themes/powerlevel10k|https://github.com/romkatv/powerlevel10k"
 )
 
@@ -92,7 +95,8 @@ GIT_EMAIL="me@gokhangunduz.dev"
 
 # Final .zshrc settings.
 ZSH_THEME_VALUE="powerlevel10k/powerlevel10k"
-ZSH_PLUGINS_VALUE="git zsh-autosuggestions zsh-syntax-highlighting"
+# Built-in OMZ plugins + the cloned ones. zsh-syntax-highlighting MUST stay last.
+ZSH_PLUGINS_VALUE="git brew macos docker docker-compose gh aws npm node command-not-found zsh-completions zsh-autosuggestions zsh-syntax-highlighting"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Internals — you usually don't need to touch anything below here.
