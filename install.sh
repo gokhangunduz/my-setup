@@ -23,20 +23,23 @@ FORMULAE=(
   python
   # databases
   postgresql
-  sqlite
   mongodb-community
   # cli tools
   gh
   hcloud
   awscli
+  cloudflared
   antidote
   dockutil
+  duti
   mas
 )
 
 CASKS=(
   # browser
   google-chrome
+  # terminal
+  iterm2
   # dev tools
   visual-studio-code
   webstorm
@@ -53,12 +56,11 @@ CASKS=(
   google-gemini
   claude
   claude-code
-  codex-app
+  codex
   # utilities
   logi-options+
   betterdisplay
   teamviewer
-  nvidia-geforce-now
 )
 
 # Mac App Store apps via `mas`: "app-id|name". Sign into the App Store first.
@@ -66,28 +68,34 @@ MAS_APPS=(
   "497799835|Xcode"
   "310633997|WhatsApp"
   "640199958|Apple Developer"
+  "899247664|TestFlight"
+  "361285480|Keynote"
 )
 
-# Apps appended to the Dock, in this order, after whatever's already there. Missing
-# apps are skipped and present ones aren't re-added (uses the `dockutil` formula).
+# The Dock's app section is rebuilt to exactly this list, in this order (via the
+# `dockutil` formula). Missing apps are skipped; folders/stacks (e.g. Downloads) are
+# left untouched. Include the system apps you want pinned — they're set here too.
 DOCK_APPS=(
-  "/System/Applications/Utilities/Terminal.app"
+  "/Applications/iTerm.app"
   "/Applications/Visual Studio Code.app"
   "/Applications/Xcode.app"
   "/Applications/WebStorm.app"
   "/Applications/Cursor.app"
-  "/Applications/Docker.app"
+  "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app"
   "/Applications/Postman.app"
   "/Applications/pgAdmin 4.app"
   "/Applications/MongoDB Compass.app"
   "/Applications/Figma.app"
   "/Applications/Claude.app"
-  "/Applications/Codex.app"
   "/Applications/Gemini.app"
   "/Applications/ChatGPT.app"
-  "/Applications/Google Chrome.app"
   "/Applications/TeamViewer.app"
-  "/Applications/GeForceNOW.app"
+  "/Applications/Safari.app"
+  "/Applications/Google Chrome.app"
+  "/System/Applications/Mail.app"
+  "/System/Applications/Notes.app"
+  "/Applications/WhatsApp.app"
+  "/System/Applications/Music.app"
 )
 
 # antidote plugin list → ~/.zsh_plugins.txt. OMZ plugins load via ohmyzsh/ohmyzsh
@@ -214,6 +222,40 @@ write_zshrc() {
   mv "$tmp" "$file"; rm -f "$want" "$current"
 }
 
+# Claurora — status line for Claude Code (https://github.com/gokhangunduz/claurora).
+# Its installer drops ~/.claude/claurora.sh and wires settings.json's statusLine. Needs the
+# claude-code cask (installed earlier) and jq (ships with macOS 15+). Skips when already in.
+install_claurora() {
+  [ -f "$HOME/.claude/claurora.sh" ] && return 10
+  set_phase installing
+  curl -fsSL https://raw.githubusercontent.com/gokhangunduz/claurora/main/install.sh | bash >/dev/null 2>&1
+}
+
+# iTerm2 preferences (colours/theme/behaviour) captured in this repo. Imported once — a
+# marker key stops later runs from clobbering local tweaks. Fetched from the repo so it
+# works with the curl|bash one-liner too (needs the file pushed to main).
+ITERM_PREFS_URL="https://raw.githubusercontent.com/gokhangunduz/my-setup/main/assets/iterm/com.googlecode.iterm2.plist"
+import_iterm_prefs() {
+  [ "$(defaults read com.googlecode.iterm2 MySetupConfigured 2>/dev/null)" = "1" ] && return 10
+  set_phase importing
+  local plist; plist="$(mktemp)"
+  curl -fsSL "$ITERM_PREFS_URL" -o "$plist" 2>/dev/null && plutil -lint "$plist" >/dev/null 2>&1 \
+    || { rm -f "$plist"; return 1; }
+  defaults import com.googlecode.iterm2 "$plist" || { rm -f "$plist"; return 1; }
+  defaults write com.googlecode.iterm2 MySetupConfigured -bool true
+  rm -f "$plist"
+}
+
+# Make iTerm the default terminal: hand it the "shell" role for unix executables in
+# LaunchServices (this is what iTerm's "Make Default Term" does). Needs the duti formula.
+set_default_terminal() {
+  command -v duti >/dev/null 2>&1 || return 10
+  local ls="$HOME/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist"
+  plutil -p "$ls" 2>/dev/null | grep -q '"LSHandlerRoleShell" => "com.googlecode.iterm2"' && return 10
+  set_phase configuring
+  duti -s com.googlecode.iterm2 public.unix-executable shell
+}
+
 enable_dark_mode() {
   [ "$(defaults read -g AppleInterfaceStyle 2>/dev/null)" = "Dark" ] && return 10
   defaults write -g AppleInterfaceStyle -string Dark
@@ -223,28 +265,40 @@ enable_dark_app_icons() {
   defaults write -g AppleIconAppearanceTheme -string RegularDark
 }
 configure_dock() {
-  [ "$(defaults read com.apple.dock tilesize 2>/dev/null)" = "64" ] \
+  [ "$(defaults read com.apple.dock tilesize 2>/dev/null)" = "52" ] \
     && [ "$(defaults read com.apple.dock magnification 2>/dev/null)" = "1" ] \
-    && [ "$(defaults read com.apple.dock largesize 2>/dev/null)" = "92" ] && return 10
-  defaults write com.apple.dock tilesize -int 64 &&
-  defaults write com.apple.dock magnification -bool true &&
-  defaults write com.apple.dock largesize -int 92
+    && [ "$(defaults read com.apple.dock largesize 2>/dev/null)" = "99" ] \
+    && [ "$(defaults read com.apple.dock minimize-to-application 2>/dev/null)" = "1" ] \
+    && [ "$(defaults read com.apple.dock show-process-indicators 2>/dev/null)" = "1" ] && return 10
+  defaults write com.apple.dock tilesize -int 52 &&              # icon size
+  defaults write com.apple.dock magnification -bool true &&      # hover magnification (mıknatıs)
+  defaults write com.apple.dock largesize -int 99 &&             # magnified size
+  defaults write com.apple.dock minimize-to-application -bool true &&  # minimize into the app icon, no separate window tile
+  defaults write com.apple.dock show-process-indicators -bool true    # dots under open apps
   killall Dock 2>/dev/null; return 0
 }
-# Append DOCK_APPS after the current Dock items, in order. Skips apps that aren't
-# installed and ones already in the Dock; returns 10 when there's nothing to add.
+# Rebuild the Dock's app section to exactly DOCK_APPS, in order: clear the current
+# app tiles and re-add ours. Only the apps section is touched — folders/stacks in
+# persistent-others (e.g. Downloads) are left alone. Missing apps are skipped, so the
+# result is DOCK_APPS ∩ installed. Returns 10 when the Dock already matches.
 arrange_dock_apps() {
   command -v dockutil >/dev/null 2>&1 || return 10
   set_phase arranging
-  local app encoded added=0 current
-  current="$(defaults read com.apple.dock persistent-apps 2>/dev/null)"
-  for app in "${DOCK_APPS[@]}"; do
-    [ -d "$app" ] || continue                                  # not installed → skip
-    encoded="$(printf '%s' "$app" | sed 's/ /%20/g')"          # match the plist's URL form
-    printf '%s' "$current" | grep -qF "$encoded" && continue   # already in the Dock
-    dockutil --add "$app" --no-restart >/dev/null 2>&1 && added=$((added + 1))
-  done
-  [ "$added" -eq 0 ] && return 10
+  # Desired = DOCK_APPS that exist on disk, in order.
+  local app desired=()
+  for app in "${DOCK_APPS[@]}"; do [ -d "$app" ] && desired+=("$app"); done
+  # Current pinned apps as plain paths, in order (decode %20, drop trailing slash).
+  local current
+  current="$(dockutil --list 2>/dev/null | awk -F'\t' '$3=="persistentApps"{print $2}' \
+    | sed -E 's#^file://##; s/%20/ /g; s#/$##')"
+  [ "$current" = "$(printf '%s\n' "${desired[@]}")" ] && return 10   # already exactly this → skip
+  # Remove every app tile by bundle id (leaves persistent-others intact), then re-add in order.
+  local label url section plist bundleid
+  while IFS=$'\t' read -r label url section plist bundleid; do
+    [ "$section" = "persistentApps" ] && [ -n "$bundleid" ] \
+      && dockutil --remove "$bundleid" --no-restart >/dev/null 2>&1
+  done < <(dockutil --list 2>/dev/null)
+  for app in "${desired[@]}"; do dockutil --add "$app" --no-restart >/dev/null 2>&1; done
   killall Dock 2>/dev/null; return 0
 }
 # Cmd+" → "Move focus to next window" (hotkey 27). params = (34=", 10=key code on
@@ -363,9 +417,12 @@ build_task_list() {
   # 5 · Shell (antidote plugin list + .zshrc)
   add_task 5 ".zsh_plugins.txt" fn write_zsh_plugins
   add_task 5 ".zshrc" fn write_zshrc
+  add_task 5 "claurora statusline" fn install_claurora
   # 6 · macOS Settings (Dock Apps last, after every app is installed/triggered)
   add_task 6 "Theme Mode" fn enable_dark_mode
   add_task 6 "App Icons" fn enable_dark_app_icons
+  add_task 6 "iTerm Settings" fn import_iterm_prefs
+  add_task 6 "iTerm Default Term" fn set_default_terminal
   add_task 6 "Dock Settings" fn configure_dock
   add_task 6 "Dock Apps" fn arrange_dock_apps
   add_task 6 "Shortcuts" fn set_next_window_shortcut
