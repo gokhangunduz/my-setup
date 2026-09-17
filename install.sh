@@ -42,13 +42,12 @@ CASKS=(
   iterm2
   # dev tools
   visual-studio-code
-  webstorm
-  cursor
   docker-desktop
   postman
   # database GUIs
   mongodb-compass
   pgadmin4
+  db-browser-for-sqlite
   # design
   figma
   # AI
@@ -58,7 +57,7 @@ CASKS=(
   claude-code
   codex
   # utilities
-  logi-options+
+  openlogi
   betterdisplay
   teamviewer
 )
@@ -69,7 +68,6 @@ MAS_APPS=(
   "310633997|WhatsApp"
   "640199958|Apple Developer"
   "899247664|TestFlight"
-  "361285480|Keynote"
 )
 
 # The Dock's app section is rebuilt to exactly this list, in this order (via the
@@ -79,8 +77,7 @@ DOCK_APPS=(
   "/Applications/iTerm.app"
   "/Applications/Visual Studio Code.app"
   "/Applications/Xcode.app"
-  "/Applications/WebStorm.app"
-  "/Applications/Cursor.app"
+  "/Applications/DB Browser for SQLite.app"
   "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app"
   "/Applications/Postman.app"
   "/Applications/pgAdmin 4.app"

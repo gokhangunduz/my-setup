@@ -29,8 +29,8 @@ ones get a compact one-line-per-step view — each item live with what it's doin
 | **Homebrew** | Installed/updated, PATH wired into `~/.zprofile` |
 | **Git** | git + global config (name/email, default branch, `pull.rebase false`) |
 | **Formulae** | node, python, postgresql, MongoDB Community (`mongodb/brew` tap), gh, hcloud, awscli, cloudflared, antidote, dockutil, duti, mas |
-| **Casks** | Chrome, iTerm2, VS Code, WebStorm, Cursor, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, Figma, ChatGPT, Gemini, Claude, Claude Code, Codex (CLI), Logi Options+, BetterDisplay, TeamViewer |
-| **Mac App Store** | Xcode, WhatsApp, Apple Developer, TestFlight, Keynote via `mas` — triggered in the background (no waiting on Xcode's download); skipped if you're not signed into the App Store |
+| **Casks** | Chrome, iTerm2, VS Code, Docker Desktop, Postman, MongoDB Compass, pgAdmin 4, DB Browser for SQLite, Figma, ChatGPT, Gemini, Claude, Claude Code, Codex (CLI), OpenLogi, BetterDisplay, TeamViewer |
+| **Mac App Store** | Xcode, WhatsApp, Apple Developer, TestFlight via `mas` — triggered in the background (no waiting on Xcode's download); skipped if you're not signed into the App Store |
 | **Shell** | [antidote](https://antidote.sh) loading Powerlevel10k, zsh-autosuggestions/-syntax-highlighting/-completions, and Oh My Zsh plugins (git, brew, docker, gh, aws, npm, …) from `~/.zsh_plugins.txt`; plus [Claurora](https://github.com/gokhangunduz/claurora) status line for Claude Code |
 | **macOS Settings** | Dark mode, app icons, iTerm2 prefs + default terminal (via `duti`), Dock size + magnification, minimize-into-icon, Dock apps (rebuilt in exact order via `dockutil`), `Cmd+"` shortcut, firewall, battery, hostname |
 | **macOS Updates** | Command Line Tools + macOS checked separately; available updates download in the background |
