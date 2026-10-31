@@ -50,6 +50,7 @@ CASKS=(
   db-browser-for-sqlite
   # design
   figma
+  blender
   # AI
   chatgpt
   google-gemini
@@ -82,6 +83,8 @@ DOCK_APPS=(
   "/Applications/Postman.app"
   "/Applications/pgAdmin 4.app"
   "/Applications/MongoDB Compass.app"
+  "/Applications/TestFlight.app"
+  "/Applications/Developer.app"
   "/Applications/Figma.app"
   "/Applications/Claude.app"
   "/Applications/Gemini.app"
